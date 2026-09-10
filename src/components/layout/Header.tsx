@@ -6,7 +6,7 @@ import {
   Bot, 
   SearchCode, 
   Radio, 
-  Flame, 
+  FileSearch, 
   ChevronDown,
   Trophy,
   Activity,
@@ -27,7 +27,7 @@ interface HeaderProps {
   onSelectSocSubView?: (sub: 'alerts' | 'intel' | 'topology' | 'threatmap' | 'telemetry' | 'ingest' | 'reports') => void;
   alertCount?: number;
   score?: number;
-  onOpenSimulator: () => void;
+  onOpenLogAnalysis: () => void;
   user?: UserSession;
   onLogout?: () => void;
 }
@@ -46,7 +46,7 @@ export const Header: React.FC<HeaderProps> = ({
   onSelectSocSubView,
   alertCount = 0,
   score = 1450,
-  onOpenSimulator,
+  onOpenLogAnalysis,
   user = { id: 'usr-1', name: 'Cipher_Lead', role: 'Lead SOC Analyst', score: 1450, permissions: [], badge: undefined },
   onLogout,
 }) => {
@@ -138,14 +138,14 @@ export const Header: React.FC<HeaderProps> = ({
             <span className="font-bold">{score} pts</span>
           </div>
 
-          {/* Drill simulator trigger */}
+          {/* Log analysis trigger: paste / edit / upload log data */}
           <button
-            onClick={onOpenSimulator}
-            className="flex items-center gap-1.5 rounded-lg bg-gradient-to-r from-amber-600/30 to-rose-600/30 hover:from-amber-600/40 hover:to-rose-600/40 border border-amber-500/40 px-2.5 py-1.5 text-xs font-mono text-amber-300 transition-all shadow-[0_0_15px_rgba(245,158,11,0.15)] cursor-pointer"
-            title="Inject real-time attack telemetry simulation"
+            onClick={onOpenLogAnalysis}
+            className="flex items-center gap-1.5 rounded-lg bg-gradient-to-r from-cyan-600/30 to-blue-600/30 hover:from-cyan-600/40 hover:to-blue-600/40 border border-cyan-500/40 px-2.5 py-1.5 text-xs font-mono text-cyan-300 transition-all shadow-[0_0_15px_rgba(34,211,238,0.15)] cursor-pointer"
+            title="Paste, edit, or upload log data for threat analysis"
           >
-            <Flame className="h-3.5 w-3.5 text-amber-400 animate-pulse" />
-            <span className="hidden sm:inline">Attack Drill</span>
+            <FileSearch className="h-3.5 w-3.5 text-cyan-400" />
+            <span className="hidden sm:inline">Log Analysis</span>
           </button>
 
           {/* Persona Switcher */}

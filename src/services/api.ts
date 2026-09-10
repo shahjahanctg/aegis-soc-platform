@@ -1,4 +1,4 @@
-import { Alert, IOC, Course, PhishingCampaign, CTFChallenge, CTFLeaderboardEntry, DFIRTimelineEvent, DFIRArtifact, TelemetryPoint, SensorStatus, UserSession, AnomalyResult, CorrelationResult } from '../types';
+import { Alert, IOC, Course, PhishingCampaign, CTFChallenge, CTFLeaderboardEntry, DFIRTimelineEvent, DFIRArtifact, TelemetryPoint, SensorStatus, UserSession, AnomalyResult, CorrelationResult, AnalysisRun, AnalysisRunSummary, AnalysisRunDetail } from '../types';
 import { useAuthStore, getAuthState } from '../stores/authStore';
 
 // ---------------------------------------------------------------------------
@@ -345,13 +345,27 @@ export const api = {
   },
 
   // ---------------------------------------------------------------------------
-  // Simulation Injection
+  // Log & data analysis (paste / edit / upload log files)
   // ---------------------------------------------------------------------------
-  async injectSimulation(scenario: 'ransomware' | 'beacon' | 'sqli'): Promise<{ success: boolean; alert: Alert }> {
-    const res = await authedFetch('/api/simulation/inject', {
+  async analyzeLog(content: string, opts?: { source?: string; createAlerts?: boolean }): Promise<AnalysisRun> {
+    const params = new URLSearchParams();
+    if (opts?.source) params.set('source', opts.source.slice(0, 200));
+    params.set('createAlerts', opts?.createAlerts === false ? '0' : '1');
+    const res = await authedFetch(`/api/analysis/ingest?${params.toString()}`, {
       method: 'POST',
-      body: JSON.stringify({ scenario }),
+      headers: { 'Content-Type': 'text/plain' },
+      body: content,
     });
-    return jsonOrThrow(res, { success: false } as any);
-  }
+    return jsonOrThrow(res, {} as AnalysisRun);
+  },
+
+  async getAnalysisRuns(limit = 10): Promise<{ runs: AnalysisRunSummary[] }> {
+    const res = await authedFetch(`/api/analysis/runs?limit=${limit}`);
+    return jsonOrThrow(res, { runs: [] });
+  },
+
+  async getAnalysisRun(id: string): Promise<AnalysisRunDetail> {
+    const res = await authedFetch(`/api/analysis/runs/${encodeURIComponent(id)}`);
+    return jsonOrThrow(res, {} as AnalysisRunDetail);
+  },
 };

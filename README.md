@@ -155,6 +155,8 @@ Seeded passwords default to `ChangeMe_<Role>_2026!` (e.g. `ChangeMe_Admin_2026!`
 
 **Zero-training-data AI (Phase 3):** no ML training anywhere. Gemini output (triage verdicts, phishing analysis, CTF hints) is schema-validated with zod before it is trusted or persisted — invalid output falls back to deterministic engines. New `/api/ai/anomaly` runs rolling z-score anomaly detection on live telemetry; `/api/ai/correlate` clusters related alerts by MITRE technique + source IP within a time window; `/api/ai/ctf-hint` generates LLM nudges from public challenge metadata only (flags never enter prompts or responses). The email analyzer parses real SPF/DKIM/DMARC headers when no API key is configured.
 
+**Log & data analysis (Phase 4):** the header **Log Analysis** button opens a paste/edit/upload workspace — type or paste log data, or upload `.log`/`.txt`/`.csv`/`.json` files (up to 2 MB). The engine parses syslog (RFC 3164/5424), JSON lines, and plain text into structured events, then runs a deterministic threat-rule engine (SQL injection, encoded PowerShell, credential dumping, ransomware, web shells, repeated failed logins, etc.). High/critical findings can be auto-promoted to live alerts, and every run is persisted and re-loadable for editing/re-analysis. The same pipeline is available to forwarders via `POST /api/analysis/ingest` (raw `text/plain` body, `?source=` & `?createAlerts=` query params).
+
 ### 3. Run Development Server
 ```bash
 npm run dev

@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Header } from './components/layout/Header';
-import { IncidentSimulatorModal } from './components/layout/IncidentSimulatorModal';
+import { LogAnalysisModal } from './components/layout/LogAnalysisModal';
 import { AlertsView } from './components/soc/AlertsView';
 import { AlertDetailModal } from './components/soc/AlertDetailModal';
 import { ThreatIntelView } from './components/soc/ThreatIntelView';
@@ -14,7 +14,7 @@ import { CTFArenaView } from './components/ctf/CTFArenaView';
 import { AISecurityHubView } from './components/ai/AISecurityHubView';
 import { DFIRTimelineView } from './components/dfir/DFIRTimelineView';
 
-import { ActiveModule, Alert, IOC, UserSession } from './types';
+import { ActiveModule, Alert, IOC, UserSession, AnalysisRun } from './types';
 import { api } from './services/api';
 import { useAuthStore } from './stores/authStore';
 import { LoginPage } from './components/layout/LoginPage';
@@ -42,7 +42,7 @@ export default function App() {
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const [iocs, setIocs] = useState<IOC[]>([]);
   const [selectedAlert, setSelectedAlert] = useState<Alert | null>(null);
-  const [isSimulatorOpen, setIsSimulatorOpen] = useState(false);
+  const [isLogAnalysisOpen, setIsLogAnalysisOpen] = useState(false);
   const [notificationToast, setNotificationToast] = useState<{ title: string; desc: string; sev: string } | null>(null);
 
   // Play subtle web audio blip for alerts
@@ -116,14 +116,13 @@ export default function App() {
     };
   }, []);
 
-  // Handler for newly injected incident from Simulator modal
-  const handleIncidentInjected = (newAlert: Alert) => {
-    setAlerts(prev => [newAlert, ...(Array.isArray(prev) ? prev.filter(a => a.id !== newAlert.id) : [])]);
-    playAlertSound(880);
+  // Handler for completed log analysis runs
+  const handleAnalysisComplete = (run: AnalysisRun) => {
+    if (run.alertsCreated > 0) playAlertSound(880);
     setNotificationToast({
-      title: 'SIMULATION TRIGGERED',
-      desc: newAlert.title,
-      sev: newAlert.severity,
+      title: 'LOG ANALYSIS COMPLETE',
+      desc: `${run.source}: ${run.findings.length} finding(s), ${run.alertsCreated} alert(s) created`,
+      sev: run.alertsCreated > 0 ? 'high' : 'medium',
     });
     setTimeout(() => setNotificationToast(null), 5000);
   };
@@ -201,7 +200,7 @@ export default function App() {
         onSelectSocSubView={setSocSubView}
         alertCount={Array.isArray(alerts) ? alerts.filter(a => a.status === 'new' || a.status === 'investigating').length : 0}
         score={user.score}
-        onOpenSimulator={() => setIsSimulatorOpen(true)}
+        onOpenLogAnalysis={() => setIsLogAnalysisOpen(true)}
         user={user}
         onLogout={clearAuth}
       />
@@ -269,11 +268,11 @@ export default function App() {
         </div>
       </footer>
 
-      {/* Incident Simulator Modal */}
-      <IncidentSimulatorModal
-        isOpen={isSimulatorOpen}
-        onClose={() => setIsSimulatorOpen(false)}
-        onIncidentInjected={handleIncidentInjected}
+      {/* Log Analysis Modal */}
+      <LogAnalysisModal
+        isOpen={isLogAnalysisOpen}
+        onClose={() => setIsLogAnalysisOpen(false)}
+        onAnalysisComplete={handleAnalysisComplete}
       />
 
       {/* Alert Deep Triage & Investigation Modal */}

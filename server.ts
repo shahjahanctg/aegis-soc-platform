@@ -9,14 +9,15 @@ import {
   requirePermission, requireIngestAuth, sseAuth, createLimiters, setUserLookup,
   toSessionUser, JWT_ACCESS_TTL_SEC, type Role, type AuthedRequest,
 } from './server/security';
-import { LoginSchema, RefreshSchema, TriageSchema, CreateAlertSchema, IngestSchema, SimulationSchema, IOCAddSchema, CampaignLaunchSchema, FlagSubmitSchema, HintUnlockSchema, DFIRAddSchema, AIChatSchema, AITriageSchema, AINlToRulesSchema, AIPhishingSchema, AITriageVerdictSchema, AIPhishingAnalysisSchema, AIAnomalySchema, AICorrelateSchema, AICtfHintSchema } from './server/schemas';
+import { LoginSchema, RefreshSchema, TriageSchema, CreateAlertSchema, IngestSchema, IOCAddSchema, CampaignLaunchSchema, FlagSubmitSchema, HintUnlockSchema, DFIRAddSchema, AIChatSchema, AITriageSchema, AINlToRulesSchema, AIPhishingSchema, AITriageVerdictSchema, AIPhishingAnalysisSchema, AIAnomalySchema, AICorrelateSchema, AICtfHintSchema } from './server/schemas';
 import { extractJson, detectTelemetryAnomalies, correlateAlerts } from './server/ai';
+import { parseLogLine, analyzeEvents, buildAnalysisSummary, findingToAlert } from './server/logParser';
 import { recordAudit, setAuditBroadcaster, setAuditSink, setAuditSource, getAuditLog } from './server/audit';
 import { makeAlertId } from './server/alertsStore';
 import { createStore, type Store } from './server/store';
 import { createSSERelay, createRateLimitStores, type SSERelay } from './server/redis';
 import type {
-  AlertItem, IOCItem, CourseItem, PhishingCampaignItem, CTFChallengeItem, DFIRTimelineEvent,
+  AlertItem, IOCItem, CourseItem, PhishingCampaignItem, CTFChallengeItem, DFIRTimelineEvent, AnalysisRun,
 } from './server/types';
 
 // Initialize Gemini Client server-side safely
@@ -862,69 +863,64 @@ Description: ${ch.description}${ch.artifactSnippet ? `\nArtifact snippet:\n${ch.
     res.json({ success: true, challenge: publicChallenge(newChallenge) });
   }));
 
-  // Simulation injector for demonstration
-  app.post('/api/simulation/inject', requireAuth, requirePermission('alerts:create'), limiters.mutation, ah(async (req, res) => {
-    const parsed = SimulationSchema.safeParse(req.body);
-    if (!parsed.success) {
-      return res.status(400).json({ error: 'Invalid scenario. Use: ransomware | beacon | sqli', code: 'INVALID_INPUT' });
-    }
-    const scenario = parsed.data.scenario;
+  // -------------------------------------------------------------
+  // Log & data analysis: paste/edit or upload log files for analysis
+  // -------------------------------------------------------------
+  // Body is raw text (text/plain) — curl friendly: curl -H 'Content-Type: text/plain' --data-binary @file.log ...
+  app.post('/api/analysis/ingest', requireAuth, requirePermission('telemetry:ingest'), limiters.ai,
+    express.text({ type: 'text/plain', limit: '2mb' }),
+    ah(async (req, res) => {
+      const raw = typeof req.body === 'string' ? req.body : '';
+      if (!raw.trim()) {
+        return res.status(400).json({ error: 'Log content is required (text/plain body)', code: 'INVALID_INPUT' });
+      }
+      const source = (typeof req.query.source === 'string' && req.query.source.trim())
+        ? req.query.source.trim().slice(0, 200)
+        : 'Pasted Log';
+      const createAlerts = req.query.createAlerts !== '0' && req.query.createAlerts !== 'false';
 
-    let newAlert: AlertItem;
-    if (scenario === 'ransomware') {
-      newAlert = {
-        id: makeAlertId(),
-        severity: 'critical',
-        status: 'new',
-        title: 'High-Volume File Renaming & Shadow Copy Deletion (Ransomware Burst)',
-        description: 'VSSADMIN.EXE delete shadows /all /quiet executed by suspicious service winhost32.exe followed by .lock extension append on 450 files',
-        source: 'EDR Behavioral Engine',
-        mitreTechnique: 'T1490 - Inhibit System Recovery',
-        mitreTactic: 'Impact',
-        sourceIp: '10.0.7.19',
-        destIp: '10.0.7.19',
-        asset: 'FILE-SERVER-BACKUP-02',
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      };
-    } else if (scenario === 'beacon') {
-      newAlert = {
-        id: makeAlertId(),
-        severity: 'high',
-        status: 'new',
-        title: 'Sliver / Mythic C2 Jitter Beacon Detected',
-        description: 'Periodic HTTPS connections at 15.2s intervals (+/- 10% jitter) with static 148-byte POST requests',
-        source: 'Zeek Network Anomaly Sensor',
-        mitreTechnique: 'T1071.001 - Web Protocols',
-        mitreTactic: 'Command and Control',
-        sourceIp: '10.0.2.14',
-        destIp: '194.26.29.114',
-        asset: 'HR-LAPTOP-22',
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      };
-    } else {
-      newAlert = {
-        id: makeAlertId(),
-        severity: 'medium',
-        status: 'new',
-        title: 'Blind SSRF Probe Against Cloud Metadata Endpoint',
-        description: 'HTTP request parameter triggered outbound connection attempt to 169.254.169.254 (AWS/GCP metadata service)',
-        source: 'AppSec Ingress Filter',
-        mitreTechnique: 'T1552.005 - Cloud Instance Metadata API',
-        mitreTactic: 'Credential Access',
-        sourceIp: '45.154.255.8',
-        destIp: '172.16.10.80',
-        asset: 'API-GW-PUBLIC',
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      };
-    }
+      const lines = raw.split(/\r?\n/).map((l) => l.trim()).filter(Boolean).slice(0, 20000);
+      const events = lines.map(parseLogLine);
+      const findings = analyzeEvents(events);
+      const summary = buildAnalysisSummary(events, findings);
+      const evidenceSet = new Set(findings.flatMap((f) => f.evidence));
+      const suspiciousCount = events.filter((e) => evidenceSet.has(e.line)).length;
 
-    await store.createAlert(newAlert);
-    recordAudit(req, 'simulation.inject', `scenario:${scenario}`, 'allowed', newAlert.title);
-    broadcastSSE('alert:new', newAlert);
-    res.json({ success: true, alert: newAlert });
+      // Optionally promote high/critical findings to live alerts
+      let alertsCreated = 0;
+      if (createAlerts) {
+        for (const f of findings.filter((x) => x.severity === 'high' || x.severity === 'critical').slice(0, 10)) {
+          const alert = findingToAlert(f);
+          await store.createAlert(alert);
+          broadcastSSE('alert:new', alert);
+          alertsCreated++;
+        }
+      }
+
+      const run: AnalysisRun = {
+        id: `ANL-${crypto.randomUUID().slice(0, 10).toUpperCase()}`,
+        userId: req.user!.id,
+        source,
+        eventCount: events.length,
+        suspiciousCount,
+        findings,
+        summary,
+        alertsCreated,
+        createdAt: new Date().toISOString(),
+      };
+      await store.createAnalysisRun(run, events);
+      recordAudit(req, 'analysis.ingest', `source:${source}`, 'allowed', `${events.length} lines, ${findings.length} findings, ${alertsCreated} alerts`);
+      res.json(run);
+    }));
+
+  app.get('/api/analysis/runs', requireAuth, requirePermission('telemetry:ingest'), ah(async (req, res) => {
+    res.json({ runs: await store.listAnalysisRuns(Number(req.query.limit) || 20) });
+  }));
+
+  app.get('/api/analysis/runs/:id', requireAuth, requirePermission('telemetry:ingest'), ah(async (req, res) => {
+    const run = await store.getAnalysisRun(req.params.id);
+    if (!run) return res.status(404).json({ error: 'Analysis run not found' });
+    res.json(run);
   }));
 
   // -------------------------------------------------------------

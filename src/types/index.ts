@@ -206,3 +206,46 @@ export interface CorrelationResult {
   clusters: CorrelationCluster[];
   summary: string;
 }
+
+export interface AnalysisEvent {
+  line: string;
+  timestamp?: string;
+  severity: string;
+  source?: string;
+  message: string;
+  ips: string[];
+}
+
+export interface AnalysisFinding {
+  type: string;
+  severity: 'low' | 'medium' | 'high' | 'critical';
+  title: string;
+  description: string;
+  evidence: string[];
+}
+
+export interface AnalysisRun {
+  id: string;
+  userId: string;
+  source: string;
+  eventCount: number;
+  suspiciousCount: number;
+  findings: AnalysisFinding[];
+  summary: string;
+  alertsCreated: number;
+  createdAt: string;
+}
+
+export interface AnalysisRunSummary {
+  id: string;
+  source: string;
+  eventCount: number;
+  suspiciousCount: number;
+  findingsCount: number;
+  summary: string;
+  createdAt: string;
+}
+
+export interface AnalysisRunDetail extends AnalysisRun {
+  events: AnalysisEvent[];
+}

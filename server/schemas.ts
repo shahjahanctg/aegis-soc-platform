@@ -66,9 +66,6 @@ export const IngestSchema = z.union([
   z.object({ events: z.array(IngestEventSchema).min(1).max(500) }),
 ]);
 
-export const SimulationSchema = z.object({
-  scenario: z.enum(['ransomware', 'beacon', 'sqli']),
-});
 
 // ---------------------------------------------------------------------------
 // Threat intel

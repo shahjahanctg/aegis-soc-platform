@@ -10,6 +10,7 @@ import {
 import type {
   AlertItem, IOCItem, CourseItem, CourseLesson, PhishingCampaignItem,
   CTFChallengeItem, LeaderboardEntry, DFIRTimelineEvent, TelemetryPoint,
+  AnalysisRun, AnalysisRunSummary, AnalysisRunDetail, AnalysisEvent,
 } from './types';
 
 // ---------------------------------------------------------------------------
@@ -93,6 +94,10 @@ export interface Store {
   // dfir
   listDfirEvents(): Promise<DFIRTimelineEvent[]>;
   addDfirEvent(event: DFIRTimelineEvent): Promise<DFIRTimelineEvent>;
+  // log analysis
+  createAnalysisRun(run: AnalysisRun, events: AnalysisEvent[]): Promise<void>;
+  listAnalysisRuns(limit: number): Promise<AnalysisRunSummary[]>;
+  getAnalysisRun(id: string): Promise<AnalysisRunDetail | null>;
 }
 
 // ---------------------------------------------------------------------------
@@ -390,6 +395,33 @@ class MemoryStore implements Store {
     if (this.dfir.length > 2000) this.dfir.shift();
     return event;
   }
+
+  // -- log analysis -----------------------------------------------------------
+  private analysisRuns: AnalysisRun[] = [];
+  private analysisEventsByRun = new Map<string, AnalysisEvent[]>();
+
+  async createAnalysisRun(run: AnalysisRun, events: AnalysisEvent[]): Promise<void> {
+    this.analysisRuns.unshift(run);
+    this.analysisEventsByRun.set(run.id, events);
+    if (this.analysisRuns.length > 500) {
+      const dropped = this.analysisRuns.pop()!;
+      this.analysisEventsByRun.delete(dropped.id);
+    }
+  }
+
+  async listAnalysisRuns(limit: number): Promise<AnalysisRunSummary[]> {
+    return this.analysisRuns.slice(0, Math.min(limit, 200)).map((r) => ({
+      id: r.id, source: r.source, eventCount: r.eventCount,
+      suspiciousCount: r.suspiciousCount, findingsCount: r.findings.length,
+      summary: r.summary, createdAt: r.createdAt,
+    }));
+  }
+
+  async getAnalysisRun(id: string): Promise<AnalysisRunDetail | null> {
+    const run = this.analysisRuns.find((r) => r.id === id);
+    if (!run) return null;
+    return { ...run, events: this.analysisEventsByRun.get(id) ?? [] };
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -472,6 +504,24 @@ CREATE TABLE IF NOT EXISTS user_hints (
   unlocked_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (user_id, challenge_id)
 );
+CREATE TABLE IF NOT EXISTS analysis_runs (
+  id TEXT PRIMARY KEY,
+  seq BIGSERIAL,
+  user_id TEXT NOT NULL,
+  source TEXT NOT NULL DEFAULT '',
+  event_count INTEGER NOT NULL DEFAULT 0,
+  suspicious_count INTEGER NOT NULL DEFAULT 0,
+  data JSONB NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS analysis_events (
+  id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  seq BIGSERIAL,
+  data JSONB NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_analysis_events_run ON analysis_events(run_id);
+CREATE INDEX IF NOT EXISTS idx_analysis_runs_created ON analysis_runs(created_at DESC);
 `;
 
 const ALERT_RETENTION = 2000; // bound alerts table growth
@@ -954,6 +1004,44 @@ class PostgresStore implements Store {
   async addDfirEvent(event: DFIRTimelineEvent): Promise<DFIRTimelineEvent> {
     await this.pool.query('INSERT INTO dfir_timeline (id, data) VALUES ($1, $2)', [event.id, JSON.stringify(event)]);
     return event;
+  }
+
+  // -- log analysis -----------------------------------------------------------
+
+  async createAnalysisRun(run: AnalysisRun, events: AnalysisEvent[]): Promise<void> {
+    await this.pool.query(
+      'INSERT INTO analysis_runs (id, user_id, source, event_count, suspicious_count, data) VALUES ($1,$2,$3,$4,$5,$6)',
+      [run.id, run.userId, run.source, run.eventCount, run.suspiciousCount, JSON.stringify(run)],
+    );
+    for (const e of events) {
+      await this.pool.query(
+        'INSERT INTO analysis_events (id, run_id, data) VALUES ($1,$2,$3)',
+        [`${run.id}-${crypto.randomUUID().slice(0, 8)}`, run.id, JSON.stringify(e)],
+      );
+    }
+  }
+
+  async listAnalysisRuns(limit: number): Promise<AnalysisRunSummary[]> {
+    const r = await this.pool.query(
+      'SELECT data FROM analysis_runs ORDER BY created_at DESC, seq DESC LIMIT $1',
+      [Math.min(limit, 200)],
+    );
+    return r.rows.map((row: any) => {
+      const d = row.data as AnalysisRun;
+      return {
+        id: d.id, source: d.source, eventCount: d.eventCount,
+        suspiciousCount: d.suspiciousCount, findingsCount: d.findings.length,
+        summary: d.summary, createdAt: d.createdAt,
+      };
+    });
+  }
+
+  async getAnalysisRun(id: string): Promise<AnalysisRunDetail | null> {
+    const r = await this.pool.query('SELECT data FROM analysis_runs WHERE id = $1', [id]);
+    if (!r.rows[0]) return null;
+    const run = r.rows[0].data as AnalysisRun;
+    const evR = await this.pool.query('SELECT data FROM analysis_events WHERE run_id = $1 ORDER BY seq ASC', [id]);
+    return { ...run, events: evR.rows.map((row: any) => row.data as AnalysisEvent) };
   }
 }
 
