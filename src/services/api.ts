@@ -386,6 +386,21 @@ export const api = {
     return jsonOrThrow(res, {} as ManagedUser);
   },
 
+  async resetUserPassword(id: string, password: string): Promise<ManagedUser> {
+    const res = await authedFetch(`/api/users/${encodeURIComponent(id)}/reset-password`, {
+      method: 'POST',
+      body: JSON.stringify({ password }),
+    });
+    return jsonOrThrow(res, {} as ManagedUser);
+  },
+
+  async deleteUser(id: string): Promise<{ success: boolean }> {
+    const res = await authedFetch(`/api/users/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    });
+    return jsonOrThrow(res, { success: false });
+  },
+
   async getSettings(): Promise<AppSettings> {
     const res = await authedFetch('/api/settings');
     const data = await jsonOrThrow<{ settings?: AppSettings }>(res, {});

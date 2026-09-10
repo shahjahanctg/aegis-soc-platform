@@ -22,6 +22,10 @@ export const CreateUserSchema = z.object({
   role: RoleEnum,
 });
 
+export const ResetPasswordSchema = z.object({
+  password: z.string().min(8).max(256),
+});
+
 export const SettingsUpdateSchema = z.object({
   alertRetention: z.number().int().min(0).max(1_000_000).optional(),
   telemetryRetention: z.number().int().min(0).max(1_000_000).optional(),

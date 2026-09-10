@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import {
   Users, HardDrive, KeyRound, ShieldAlert, Loader2, Plus, Trash2,
-  CheckCircle2, AlertTriangle, ServerCog, Save, Eye, EyeOff,
+  CheckCircle2, AlertTriangle, ServerCog, Save, Eye, EyeOff, KeyRound as KeyIcon, UserX, X,
 } from 'lucide-react';
 import { api } from '../../services/api';
 import { ManagedUser, AppSettings, UserSession } from '../../types';
@@ -29,6 +29,9 @@ export const SettingsView: React.FC<{ user: UserSession | null }> = ({ user }) =
   const [users, setUsers] = useState<ManagedUser[]>([]);
   const [newUser, setNewUser] = useState({ username: '', name: '', password: '', role: 'analyst' as ManagedUser['role'] });
   const [userMsg, setUserMsg] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
+  const [resetTarget, setResetTarget] = useState<ManagedUser | null>(null);
+  const [resetPassword, setResetPassword] = useState('');
+  const [deleteTarget, setDeleteTarget] = useState<ManagedUser | null>(null);
 
   // -- Log retention ----------------------------------------------------------
   const [settings, setSettings] = useState<AppSettings | null>(null);
@@ -82,6 +85,49 @@ export const SettingsView: React.FC<{ user: UserSession | null }> = ({ user }) =
     } catch (err: any) {
       const detail = err?.message;
       setUserMsg({ kind: 'err', text: detail?.includes('Username already exists') ? 'That username is already taken.' : 'Failed to create user — check the server and input.' });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleResetPassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!resetTarget || resetPassword.length < 8) return;
+    setBusy(true);
+    setUserMsg(null);
+    try {
+      await api.resetUserPassword(resetTarget.id, resetPassword);
+      setUserMsg({ kind: 'ok', text: `Password reset for '${resetTarget.username}'.` });
+      setResetTarget(null);
+      setResetPassword('');
+    } catch (err) {
+      console.error(err);
+      setUserMsg({ kind: 'err', text: 'Failed to reset password — check the server.' });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleDeleteUser = async () => {
+    if (!deleteTarget) return;
+    setBusy(true);
+    setUserMsg(null);
+    try {
+      await api.deleteUser(deleteTarget.id);
+      setUserMsg({ kind: 'ok', text: `Account '${deleteTarget.username}' deleted (per-user progress and solves removed).` });
+      setDeleteTarget(null);
+      await refreshUsers();
+    } catch (err: any) {
+      console.error(err);
+      const msg = err?.message || '';
+      setUserMsg({
+        kind: 'err',
+        text: msg.includes('last admin')
+          ? 'Cannot delete the last admin account.'
+          : msg.includes('own account')
+            ? 'You cannot delete your own account.'
+            : 'Failed to delete user — check the server.',
+      });
     } finally {
       setBusy(false);
     }
@@ -243,23 +289,114 @@ export const SettingsView: React.FC<{ user: UserSession | null }> = ({ user }) =
               {users.length === 0 && (
                 <p className="text-xs text-gray-500 font-mono">No accounts yet.</p>
               )}
-              {users.map((u) => (
-                <div key={u.id} className="flex items-center gap-3 rounded-lg border border-gray-800 bg-gray-900/50 px-3 py-2.5">
-                  <div className="flex h-8 w-8 items-center justify-center rounded-full bg-cyan-950 text-cyan-400 font-mono text-[11px] font-bold border border-cyan-800 shrink-0">
-                    {u.name.slice(0, 2).toUpperCase()}
+              {users.map((u) => {
+                const isSelf = u.id === user?.id;
+                return (
+                  <div key={u.id} className="flex items-center gap-3 rounded-lg border border-gray-800 bg-gray-900/50 px-3 py-2.5">
+                    <div className="flex h-8 w-8 items-center justify-center rounded-full bg-cyan-950 text-cyan-400 font-mono text-[11px] font-bold border border-cyan-800 shrink-0">
+                      {u.name.slice(0, 2).toUpperCase()}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="font-mono text-xs font-bold text-gray-100 truncate">
+                        {u.name}{isSelf && <span className="ml-1.5 text-[9px] text-cyan-400 font-mono uppercase">(you)</span>}
+                      </p>
+                      <p className="text-[10px] font-mono text-gray-500 truncate">@{u.username}</p>
+                    </div>
+                    <span className={`shrink-0 rounded border px-2 py-0.5 text-[10px] font-mono font-bold uppercase ${ROLE_STYLES[u.role]}`}>
+                      {u.role}
+                    </span>
+                    <span className="shrink-0 rounded bg-amber-950/40 border border-amber-800/60 px-2 py-0.5 text-[10px] font-mono text-amber-300">
+                      {u.score} pts
+                    </span>
+                    <div className="flex shrink-0 items-center gap-1.5">
+                      <button
+                        onClick={() => { setResetTarget(u); setResetPassword(''); setUserMsg(null); }}
+                        disabled={busy}
+                        className="flex items-center gap-1 rounded-md border border-gray-700 bg-gray-900 px-2 py-1 text-[10px] font-mono text-cyan-400 hover:bg-gray-800 transition-all cursor-pointer disabled:opacity-50"
+                        title={`Reset password for ${u.username}`}
+                      >
+                        <KeyIcon className="h-3 w-3" />
+                        Reset PW
+                      </button>
+                      <button
+                        onClick={() => { setDeleteTarget(u); setUserMsg(null); }}
+                        disabled={busy || isSelf}
+                        className="flex items-center gap-1 rounded-md border border-rose-900/60 bg-rose-950/30 px-2 py-1 text-[10px] font-mono text-rose-300 hover:bg-rose-950/60 transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                        title={isSelf ? 'You cannot delete your own account' : `Delete ${u.username} and all per-user data`}
+                      >
+                        <UserX className="h-3 w-3" />
+                        Delete
+                      </button>
+                    </div>
                   </div>
-                  <div className="flex-1 min-w-0">
-                    <p className="font-mono text-xs font-bold text-gray-100 truncate">{u.name}</p>
-                    <p className="text-[10px] font-mono text-gray-500 truncate">@{u.username}</p>
+                );
+              })}
+
+              {/* Inline reset-password form */}
+              {resetTarget && (
+                <form onSubmit={handleResetPassword} className="mt-3 rounded-lg border border-cyan-800/60 bg-cyan-950/20 p-3">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-[11px] font-mono font-bold text-cyan-300 uppercase">
+                      Reset password for @{resetTarget.username}
+                    </span>
+                    <button type="button" onClick={() => setResetTarget(null)} className="text-gray-400 hover:text-gray-200 cursor-pointer">
+                      <X className="h-4 w-4" />
+                    </button>
                   </div>
-                  <span className={`shrink-0 rounded border px-2 py-0.5 text-[10px] font-mono font-bold uppercase ${ROLE_STYLES[u.role]}`}>
-                    {u.role}
-                  </span>
-                  <span className="shrink-0 rounded bg-amber-950/40 border border-amber-800/60 px-2 py-0.5 text-[10px] font-mono text-amber-300">
-                    {u.score} pts
-                  </span>
+                  <div className="flex gap-2">
+                    <input
+                      type="password"
+                      value={resetPassword}
+                      onChange={(e) => setResetPassword(e.target.value)}
+                      minLength={8} maxLength={256} required autoComplete="new-password"
+                      placeholder="New password (min 8 chars)"
+                      className="flex-1 rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm font-mono outline-none focus:border-cyan-500"
+                    />
+                    <button
+                      type="submit"
+                      disabled={busy || resetPassword.length < 8}
+                      className="flex items-center gap-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 px-4 py-2 text-xs font-mono font-bold text-white transition cursor-pointer"
+                    >
+                      {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <KeyIcon className="h-3.5 w-3.5" />}
+                      Set Password
+                    </button>
+                  </div>
+                </form>
+              )}
+
+              {/* Inline delete confirmation */}
+              {deleteTarget && (
+                <div className="mt-3 rounded-lg border border-rose-800/70 bg-rose-950/20 p-3">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-[11px] font-mono font-bold text-rose-300 uppercase">
+                      Delete @{deleteTarget.username}?
+                    </span>
+                    <button type="button" onClick={() => setDeleteTarget(null)} className="text-gray-400 hover:text-gray-200 cursor-pointer">
+                      <X className="h-4 w-4" />
+                    </button>
+                  </div>
+                  <p className="text-[11px] text-gray-400 font-mono mb-3">
+                    Removes the account, its CTF solves, hint unlocks, and training progress. This cannot be undone.
+                  </p>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={handleDeleteUser}
+                      disabled={busy}
+                      className="flex items-center gap-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 disabled:opacity-50 px-4 py-2 text-xs font-mono font-bold text-white transition cursor-pointer"
+                    >
+                      {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
+                      Confirm Delete
+                    </button>
+                    <button
+                      onClick={() => setDeleteTarget(null)}
+                      disabled={busy}
+                      className="rounded-lg border border-gray-700 bg-gray-900 px-4 py-2 text-xs font-mono text-gray-300 hover:bg-gray-800 transition cursor-pointer"
+                    >
+                      Cancel
+                    </button>
+                  </div>
                 </div>
-              ))}
+              )}
             </div>
           </div>
         </div>

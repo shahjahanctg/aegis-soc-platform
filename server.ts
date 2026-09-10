@@ -9,7 +9,7 @@ import {
   requirePermission, requireIngestAuth, sseAuth, createLimiters, setUserLookup,
   toSessionUser, JWT_ACCESS_TTL_SEC, type Role, type AuthedRequest,
 } from './server/security';
-import { LoginSchema, RefreshSchema, CreateUserSchema, SettingsUpdateSchema, TriageSchema, CreateAlertSchema, IngestSchema, IOCAddSchema, CampaignLaunchSchema, FlagSubmitSchema, HintUnlockSchema, DFIRAddSchema, AIChatSchema, AITriageSchema, AINlToRulesSchema, AIPhishingSchema, AITriageVerdictSchema, AIPhishingAnalysisSchema, AIAnomalySchema, AICorrelateSchema, AICtfHintSchema } from './server/schemas';
+import { LoginSchema, RefreshSchema, CreateUserSchema, ResetPasswordSchema, SettingsUpdateSchema, TriageSchema, CreateAlertSchema, IngestSchema, IOCAddSchema, CampaignLaunchSchema, FlagSubmitSchema, HintUnlockSchema, DFIRAddSchema, AIChatSchema, AITriageSchema, AINlToRulesSchema, AIPhishingSchema, AITriageVerdictSchema, AIPhishingAnalysisSchema, AIAnomalySchema, AICorrelateSchema, AICtfHintSchema } from './server/schemas';
 import { extractJson, detectTelemetryAnomalies, correlateAlerts } from './server/ai';
 import { parseLogLine, analyzeEvents, buildAnalysisSummary, findingToAlert } from './server/logParser';
 import { recordAudit, setAuditBroadcaster, setAuditSink, setAuditSource, getAuditLog } from './server/audit';
@@ -229,6 +229,35 @@ async function startServer() {
       }
       throw err;
     }
+  }));
+
+  app.post('/api/users/:id/reset-password', requireAuth, requirePermission('admin'), limiters.mutation, ah(async (req, res) => {
+    const parsed = ResetPasswordSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: 'New password is required (min 8 chars)', code: 'INVALID_INPUT', details: parsed.error.flatten().fieldErrors });
+    }
+    const user = await store.resetUserPassword(req.params.id, parsed.data.password);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    recordAudit(req, 'users.resetPassword', `user:${user.username}`, 'allowed');
+    res.json(user);
+  }));
+
+  app.delete('/api/users/:id', requireAuth, requirePermission('admin'), limiters.mutation, ah(async (req, res) => {
+    if (req.params.id === req.user!.id) {
+      return res.status(400).json({ error: 'You cannot delete your own account', code: 'SELF_DELETE' });
+    }
+    const target = await store.findUserById(req.params.id);
+    if (!target) return res.status(404).json({ error: 'User not found' });
+    if (target.role === 'admin') {
+      const admins = (await store.listUsers()).filter((u) => u.role === 'admin');
+      if (admins.length <= 1) {
+        return res.status(400).json({ error: 'Cannot delete the last admin account', code: 'LAST_ADMIN' });
+      }
+    }
+    const deleted = await store.deleteUser(req.params.id);
+    if (!deleted) return res.status(404).json({ error: 'User not found' });
+    recordAudit(req, 'users.delete', `user:${deleted.username}`, 'allowed', `role=${deleted.role}`);
+    res.json({ success: true, user: deleted });
   }));
 
   // -------------------------------------------------------------

@@ -62,6 +62,8 @@ export interface Store {
   findUserById(id: string): Promise<SafeUser | null>;
   listUsers(): Promise<ManagedUser[]>;
   createUser(input: { username: string; name: string; password: string; role: Role }): Promise<ManagedUser>;
+  deleteUser(id: string): Promise<ManagedUser | null>;
+  resetUserPassword(id: string, newPassword: string): Promise<ManagedUser | null>;
   // settings
   getSettings(): Promise<StoredSettings>;
   updateSettings(patch: Partial<StoredSettings>): Promise<StoredSettings>;
@@ -270,6 +272,28 @@ class MemoryStore implements Store {
     const user = makeUser(input.username, input.name, input.password, input.role);
     this.users.push(user);
     return { id: user.id, username: user.username, name: user.name, role: user.role, badge: user.badge, score: 0 };
+  }
+
+  async deleteUser(id: string): Promise<ManagedUser | null> {
+    const idx = this.users.findIndex((u) => u.id === id);
+    if (idx === -1) return null;
+    const [removed] = this.users.splice(idx, 1);
+    // Drop per-user state (progress, solves, hints).
+    const prefix = `${removed.id}:`;
+    for (const key of [...this.progressKeys]) if (key.startsWith(prefix)) this.progressKeys.delete(key);
+    for (const key of [...this.solveKeys]) if (key.startsWith(prefix)) this.solveKeys.delete(key);
+    for (const key of [...this.hintKeys]) if (key.startsWith(prefix)) this.hintKeys.delete(key);
+    for (const key of [...this.lastSolvedAt.keys()]) if (key.startsWith(prefix)) this.lastSolvedAt.delete(key);
+    return { id: removed.id, username: removed.username, name: removed.name, role: removed.role, badge: removed.badge, score: removed.score };
+  }
+
+  async resetUserPassword(id: string, newPassword: string): Promise<ManagedUser | null> {
+    const user = this.users.find((u) => u.id === id);
+    if (!user) return null;
+    const { salt, hash } = hashPassword(newPassword);
+    user.passwordSalt = salt;
+    user.passwordHash = hash;
+    return { id: user.id, username: user.username, name: user.name, role: user.role, badge: user.badge, score: user.score };
   }
 
   async getSettings(): Promise<StoredSettings> {
@@ -758,6 +782,46 @@ class PostgresStore implements Store {
       throw err;
     }
     return { id: user.id, username: user.username, name: user.name, role: user.role, badge: user.badge, score: 0 };
+  }
+
+  async deleteUser(id: string): Promise<ManagedUser | null> {
+    const r = await this.pool.query(
+      'SELECT id, username, name, role, badge, score FROM users WHERE id = $1',
+      [id],
+    );
+    if (!r.rows[0]) return null;
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      // Cascade per-user state, then the account itself.
+      await client.query('DELETE FROM user_progress WHERE user_id = $1', [id]);
+      await client.query('DELETE FROM user_solves WHERE user_id = $1', [id]);
+      await client.query('DELETE FROM user_hints WHERE user_id = $1', [id]);
+      await client.query('DELETE FROM users WHERE id = $1', [id]);
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+    const row = r.rows[0];
+    return {
+      id: row.id, username: row.username, name: row.name,
+      role: row.role, badge: row.badge ?? undefined, score: row.score,
+    };
+  }
+
+  async resetUserPassword(id: string, newPassword: string): Promise<ManagedUser | null> {
+    const r = await this.pool.query('SELECT id, username, name, role, badge, score FROM users WHERE id = $1', [id]);
+    if (!r.rows[0]) return null;
+    const { salt, hash } = hashPassword(newPassword);
+    await this.pool.query('UPDATE users SET password_salt = $2, password_hash = $3 WHERE id = $1', [id, salt, hash]);
+    const row = r.rows[0];
+    return {
+      id: row.id, username: row.username, name: row.name,
+      role: row.role, badge: row.badge ?? undefined, score: row.score,
+    };
   }
 
   // -- settings -------------------------------------------------------------

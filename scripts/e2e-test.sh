@@ -104,6 +104,48 @@ ok "viewer login"
 code=$(http POST /api/users "$TMP/user.json" "$ANA")
 [ "$code" = "403" ] && ok "analyst denied user creation (403)" || bad "analyst user creation -> $code (want 403)"
 
+# Password reset + deletion lifecycle
+say "\n[2b] User reset & deletion"
+echo '{"username":"tempuser","name":"Temporary User","password":"Temp_Pass_2026!","role":"analyst"}' > "$TMP/tempuser.json"
+code=$(http POST /api/users "$TMP/tempuser.json" "$ADMIN")
+TEMP_ID=$(extract "$TMP/body" 'j.id')
+[ "$code" = "200" ] && [ -n "$TEMP_ID" ] && ok "created temporary user" || bad "create temp user -> $code"
+
+# Old password still works, reset then verify new one works
+TEMP_OLD=$(login tempuser "Temp_Pass_2026!") || { bad "temp user login failed"; exit 1; }
+ok "temp user login (original password)"
+echo '{"password":"Rotated_Pass_2026!"}' > "$TMP/reset.json"
+code=$(http POST "/api/users/$TEMP_ID/reset-password" "$TMP/reset.json" "$ADMIN")
+[ "$code" = "200" ] && ok "admin reset password" || bad "reset password -> $code"
+TEMP_NEW=$(login tempuser "Rotated_Pass_2026!") || { bad "temp user login after reset failed"; exit 1; }
+ok "temp user login with new password"
+code=$(http POST /api/auth/login "$TMP/login.json")
+echo '{"username":"tempuser","password":"Temp_Pass_2026!"}' > "$TMP/oldpass.json"
+code=$(http POST /api/auth/login "$TMP/oldpass.json")
+[ "$code" = "401" ] && ok "old password rejected after reset" || bad "old password after reset -> $code (want 401)"
+
+# Non-admin cannot reset
+code=$(http POST "/api/users/$TEMP_ID/reset-password" "$TMP/reset.json" "$ANA")
+[ "$code" = "403" ] && ok "non-admin denied reset (403)" || bad "analyst reset -> $code (want 403)"
+
+# Cannot delete self; deleting the temp user removes it
+code=$(http GET /api/users "" "$ADMIN")
+ADMIN_ID=$(extract "$TMP/body" 'j.users.find(function(u){return u.username==="admin"}).id')
+code=$(http DELETE "/api/users/$ADMIN_ID" "" "$ADMIN")
+[ "$code" = "400" ] && ok "cannot delete own account (400)" || bad "self delete -> $code (want 400)"
+code=$(http DELETE "/api/users/$TEMP_ID" "" "$ADMIN")
+[ "$code" = "200" ] && ok "admin deleted temp user" || bad "delete user -> $code"
+code=$(http GET "/api/users" "" "$ADMIN")
+if echo "$(extract "$TMP/body" 'JSON.stringify(j)' 2>/dev/null || echo '')" | grep -q "tempuser"; then
+  bad "deleted user still listed"
+else
+  ok "deleted user removed from list"
+fi
+# Deleted user cannot log in
+echo '{"username":"tempuser","password":"Rotated_Pass_2026!"}' > "$TMP/deletedlogin.json"
+code=$(http POST /api/auth/login "$TMP/deletedlogin.json")
+[ "$code" = "401" ] && ok "deleted user login -> 401" || bad "deleted user login -> $code (want 401)"
+
 # 3. Alerts: platform starts empty, alerts created via API ---------------------
 say "\n[3] Alerts (empty start)"
 code=$(http GET "/api/alerts" "" "$ANA")
