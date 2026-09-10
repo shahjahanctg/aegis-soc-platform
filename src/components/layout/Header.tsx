@@ -18,7 +18,7 @@ import {
 } from 'lucide-react';
 import { ActiveModule, UserSession } from '../../types';
 import { api } from '../../services/api';
-import { LogOut } from 'lucide-react';
+import { LogOut, Settings } from 'lucide-react';
 
 interface HeaderProps {
   activeModule: ActiveModule;
@@ -45,9 +45,9 @@ export const Header: React.FC<HeaderProps> = ({
   socSubView = 'alerts',
   onSelectSocSubView,
   alertCount = 0,
-  score = 1450,
+  score = 0,
   onOpenLogAnalysis,
-  user = { id: 'usr-1', name: 'Cipher_Lead', role: 'Lead SOC Analyst', score: 1450, permissions: [], badge: undefined },
+  user,
   onLogout,
 }) => {
   const [roleDropdownOpen, setRoleDropdownOpen] = useState(false);
@@ -55,9 +55,10 @@ export const Header: React.FC<HeaderProps> = ({
   const modules: NavItem[] = [
     { id: 'soc', label: 'SOC Operations', icon: ShieldAlert, badge: alertCount > 0 ? `${alertCount} ALERTS` : undefined },
     { id: 'training', label: 'Training & LMS', icon: GraduationCap },
-    { id: 'ctf', label: 'CTF Arena', icon: Flag, badge: 'LIVE' },
-    { id: 'ai', label: 'AI Security Hub', icon: Bot, badge: 'GEMINI 3.8' },
+    { id: 'ctf', label: 'CTF Arena', icon: Flag },
+    { id: 'ai', label: 'AI Security Hub', icon: Bot },
     { id: 'dfir', label: 'DFIR Timeline', icon: SearchCode },
+    ...(user?.role === 'admin' ? [{ id: 'settings' as ActiveModule, label: 'Settings', icon: Settings }] : []),
   ];
 
   const socSubTabs = [
@@ -155,11 +156,11 @@ export const Header: React.FC<HeaderProps> = ({
               className="flex items-center gap-1.5 rounded-lg bg-gray-900 hover:bg-gray-800 border border-gray-800 px-2 py-1.5 text-xs text-gray-200 transition-all cursor-pointer"
             >
               <div className="flex h-6 w-6 items-center justify-center rounded-full bg-cyan-950 text-cyan-400 font-mono text-[10px] font-bold border border-cyan-800">
-                {user.name.slice(0, 2).toUpperCase()}
+                {(user?.name || '?').slice(0, 2).toUpperCase()}
               </div>
               <div className="text-left hidden xl:block">
-                <p className="text-[11px] font-medium leading-tight text-gray-200">{user.name}</p>
-                <p className="text-[9px] font-mono text-cyan-400">{user.role}</p>
+                <p className="text-[11px] font-medium leading-tight text-gray-200">{user?.name}</p>
+                <p className="text-[9px] font-mono text-cyan-400">{user?.role}</p>
               </div>
               <ChevronDown className="h-3 w-3 text-gray-400" />
             </button>
@@ -168,10 +169,10 @@ export const Header: React.FC<HeaderProps> = ({
               <div className="absolute right-0 mt-2 w-64 rounded-xl border border-gray-800 bg-gray-950 p-2 shadow-2xl z-50">
                 <div className="px-2 py-1.5 border-b border-gray-800 mb-1">
                   <p className="text-[11px] font-mono text-gray-400 uppercase tracking-wider">Signed in as</p>
-                  <p className="text-xs font-medium text-gray-200 mt-1">{user.name}</p>
-                  <p className="text-[10px] font-mono text-cyan-400">{user.role}{user.badge ? ` · ${user.badge}` : ''}</p>
+                  <p className="text-xs font-medium text-gray-200 mt-1">{user?.name}</p>
+                  <p className="text-[10px] font-mono text-cyan-400">{user?.role}{user?.badge ? ` · ${user.badge}` : ''}</p>
                 </div>
-                {user.permissions && user.permissions.length > 0 && (
+                {user?.permissions && user.permissions.length > 0 && (
                   <div className="px-2 py-1.5 border-b border-gray-800 mb-1">
                     <p className="text-[10px] font-mono text-gray-500 leading-relaxed">{user.permissions.filter(p => p !== '*').slice(0, 6).join(' · ')}</p>
                   </div>

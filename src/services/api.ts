@@ -1,4 +1,4 @@
-import { Alert, IOC, Course, PhishingCampaign, CTFChallenge, CTFLeaderboardEntry, DFIRTimelineEvent, DFIRArtifact, TelemetryPoint, SensorStatus, UserSession, AnomalyResult, CorrelationResult, AnalysisRun, AnalysisRunSummary, AnalysisRunDetail } from '../types';
+import { Alert, IOC, Course, PhishingCampaign, CTFChallenge, CTFLeaderboardEntry, DFIRTimelineEvent, DFIRArtifact, TelemetryPoint, SensorStatus, UserSession, AnomalyResult, CorrelationResult, AnalysisRun, AnalysisRunSummary, AnalysisRunDetail, ManagedUser, AppSettings } from '../types';
 import { useAuthStore, getAuthState } from '../stores/authStore';
 
 // ---------------------------------------------------------------------------
@@ -367,5 +367,37 @@ export const api = {
   async getAnalysisRun(id: string): Promise<AnalysisRunDetail> {
     const res = await authedFetch(`/api/analysis/runs/${encodeURIComponent(id)}`);
     return jsonOrThrow(res, {} as AnalysisRunDetail);
+  },
+
+  // ---------------------------------------------------------------------------
+  // User management (admin) + platform settings
+  // ---------------------------------------------------------------------------
+  async listUsers(): Promise<ManagedUser[]> {
+    const res = await authedFetch('/api/users');
+    const data = await jsonOrThrow<{ users?: ManagedUser[] }>(res, {});
+    return data.users ?? [];
+  },
+
+  async createUser(input: { username: string; name: string; password: string; role: ManagedUser['role'] }): Promise<ManagedUser> {
+    const res = await authedFetch('/api/users', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
+    return jsonOrThrow(res, {} as ManagedUser);
+  },
+
+  async getSettings(): Promise<AppSettings> {
+    const res = await authedFetch('/api/settings');
+    const data = await jsonOrThrow<{ settings?: AppSettings }>(res, {});
+    return data.settings ?? { alertRetention: 2000, telemetryRetention: 2000, analysisRetention: 500, geminiConfigured: false };
+  },
+
+  async updateSettings(patch: Partial<AppSettings> & { geminiApiKey?: string | null }): Promise<AppSettings> {
+    const res = await authedFetch('/api/settings', {
+      method: 'PUT',
+      body: JSON.stringify(patch),
+    });
+    const data = await jsonOrThrow<{ settings?: AppSettings }>(res, {});
+    return data.settings ?? ({} as AppSettings);
   },
 };

@@ -121,16 +121,9 @@ export const CTFArenaView: React.FC<CTFArenaViewProps> = ({ user, onPointsUpdate
       } else if (cmd === 'ls') {
         newHistory.push('evidence.raw   pcap_dump.pcap   malware_hash.txt');
       } else if (cmd.startsWith('strings')) {
-        if (selectedChallenge?.category === 'Forensics') {
-          newHistory.push('... vssadmin delete shadows /all /quiet');
-          newHistory.push('FLAG{SHADOW_COPIES_ANNIHILATED_2026}');
-        } else if (selectedChallenge?.category === 'Web AppSec') {
-          newHistory.push('... UNION SELECT 1, column_name FROM information_schema.columns');
-          newHistory.push('FLAG{BLIND_SQLI_BYPASS_CONFIRMED}');
-        } else {
-          newHistory.push('... beacon_egress: 185.220.101.5:443');
-          newHistory.push('FLAG{COBALT_STRIKE_MEMORY_EXTRACTED_99}');
-        }
+        // Flags are never embedded client-side — submissions are validated server-only.
+        newHistory.push('[sandbox] artifact scan in progress...');
+        newHistory.push('Only the server can validate captured flags — submit what you find in the submission box.');
       } else if (cmd.startsWith('cat')) {
         newHistory.push('0x00004f: 46 4c 41 47 7b ... [ENCRYPTED ARTIFACT]');
       } else {
@@ -187,7 +180,7 @@ export const CTFArenaView: React.FC<CTFArenaViewProps> = ({ user, onPointsUpdate
         <div className="space-y-4">
           {/* Category Filter Pills */}
           <div className="flex items-center gap-2 overflow-x-auto pb-1 text-xs font-mono">
-            {['all', 'Incident Response', 'Forensics', 'Web AppSec', 'Reverse Engineering', 'Cryptography'].map(cat => (
+            {['all', 'Web Exploitation', 'Forensics', 'Reverse Engineering', 'Cryptography', 'OSINT', 'Pwn / Binary'].map(cat => (
               <button
                 key={cat}
                 onClick={() => setCategoryFilter(cat)}

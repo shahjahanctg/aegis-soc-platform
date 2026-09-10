@@ -9,23 +9,26 @@ import {
   requirePermission, requireIngestAuth, sseAuth, createLimiters, setUserLookup,
   toSessionUser, JWT_ACCESS_TTL_SEC, type Role, type AuthedRequest,
 } from './server/security';
-import { LoginSchema, RefreshSchema, TriageSchema, CreateAlertSchema, IngestSchema, IOCAddSchema, CampaignLaunchSchema, FlagSubmitSchema, HintUnlockSchema, DFIRAddSchema, AIChatSchema, AITriageSchema, AINlToRulesSchema, AIPhishingSchema, AITriageVerdictSchema, AIPhishingAnalysisSchema, AIAnomalySchema, AICorrelateSchema, AICtfHintSchema } from './server/schemas';
+import { LoginSchema, RefreshSchema, CreateUserSchema, SettingsUpdateSchema, TriageSchema, CreateAlertSchema, IngestSchema, IOCAddSchema, CampaignLaunchSchema, FlagSubmitSchema, HintUnlockSchema, DFIRAddSchema, AIChatSchema, AITriageSchema, AINlToRulesSchema, AIPhishingSchema, AITriageVerdictSchema, AIPhishingAnalysisSchema, AIAnomalySchema, AICorrelateSchema, AICtfHintSchema } from './server/schemas';
 import { extractJson, detectTelemetryAnomalies, correlateAlerts } from './server/ai';
 import { parseLogLine, analyzeEvents, buildAnalysisSummary, findingToAlert } from './server/logParser';
 import { recordAudit, setAuditBroadcaster, setAuditSink, setAuditSource, getAuditLog } from './server/audit';
 import { makeAlertId } from './server/alertsStore';
-import { createStore, type Store } from './server/store';
+import { createStore, publicSettings, type Store } from './server/store';
 import { createSSERelay, createRateLimitStores, type SSERelay } from './server/redis';
 import type {
   AlertItem, IOCItem, CourseItem, PhishingCampaignItem, CTFChallengeItem, DFIRTimelineEvent, AnalysisRun,
 } from './server/types';
 
-// Initialize Gemini Client server-side safely
+// Initialize Gemini Client server-side safely. The API key is resolved from
+// runtime settings (admin-configured via /api/settings) falling back to the
+// GEMINI_API_KEY env var, so it can be set/rotated without a restart.
+let geminiApiKey: string | null = process.env.GEMINI_API_KEY || null;
+
 const getGeminiClient = () => {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) return null;
+  if (!geminiApiKey) return null;
   return new GoogleGenAI({
-    apiKey,
+    apiKey: geminiApiKey,
     httpOptions: {
       headers: {
         'User-Agent': 'aistudio-build',
@@ -75,6 +78,11 @@ async function startServer() {
     void store.recordAudit(entry).catch((err) => console.warn('[audit] persist failed:', err?.message || err));
   });
   setAuditSource((limit) => store.getAuditLog(limit));
+
+  // Load admin-configured settings (Gemini key, retention) at boot.
+  const settings = await store.getSettings();
+  if (settings.geminiApiKey) geminiApiKey = settings.geminiApiKey;
+  console.log(`[server] settings: alertRetention=${settings.alertRetention} telemetryRetention=${settings.telemetryRetention} analysisRetention=${settings.analysisRetention} gemini=${settings.geminiApiKey ? 'configured' : 'unset'}`);
 
   // Optional Redis: cross-replica SSE + shared rate limiting (graceful fallback).
   const redisUrl = process.env.REDIS_URL;
@@ -200,6 +208,51 @@ async function startServer() {
   }));
 
   // -------------------------------------------------------------
+  // User management (admin) — role-based accounts, no demo users
+  // -------------------------------------------------------------
+  app.get('/api/users', requireAuth, requirePermission('admin'), ah(async (req, res) => {
+    res.json({ users: await store.listUsers() });
+  }));
+
+  app.post('/api/users', requireAuth, requirePermission('admin'), limiters.mutation, ah(async (req, res) => {
+    const parsed = CreateUserSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: 'Invalid user payload', code: 'INVALID_INPUT', details: parsed.error.flatten().fieldErrors });
+    }
+    try {
+      const user = await store.createUser(parsed.data);
+      recordAudit(req, 'users.create', `user:${user.username}`, 'allowed', `role=${user.role}`);
+      res.json(user);
+    } catch (err: any) {
+      if (err?.message === 'USERNAME_TAKEN') {
+        return res.status(409).json({ error: 'Username already exists', code: 'USERNAME_TAKEN' });
+      }
+      throw err;
+    }
+  }));
+
+  // -------------------------------------------------------------
+  // Platform settings (admin) — log retention + Gemini API key
+  // -------------------------------------------------------------
+  app.get('/api/settings', requireAuth, requirePermission('admin'), ah(async (req, res) => {
+    res.json({ settings: publicSettings(await store.getSettings()) });
+  }));
+
+  app.put('/api/settings', requireAuth, requirePermission('admin'), limiters.mutation, ah(async (req, res) => {
+    const parsed = SettingsUpdateSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: 'Invalid settings payload', code: 'INVALID_INPUT', details: parsed.error.flatten().fieldErrors });
+    }
+    const patch = parsed.data;
+    if (patch.geminiApiKey === '') patch.geminiApiKey = null;
+    const next = await store.updateSettings(patch);
+    if ('geminiApiKey' in patch) geminiApiKey = patch.geminiApiKey;
+    recordAudit(req, 'settings.update', 'settings', 'allowed',
+      `retention:${patch.alertRetention ?? '-'}/${patch.telemetryRetention ?? '-'}/${patch.analysisRetention ?? '-'} gemini:${patch.geminiApiKey !== undefined ? (patch.geminiApiKey ? 'set' : 'cleared') : '-'}`);
+    res.json({ settings: publicSettings(next) });
+  }));
+
+  // -------------------------------------------------------------
   // Alerts Endpoints
   // -------------------------------------------------------------
   app.get('/api/alerts', requireAuth, requirePermission('alerts:read'), ah(async (req, res) => {
@@ -259,9 +312,9 @@ async function startServer() {
       source: d.source,
       mitreTechnique: d.mitreTechnique || 'T1059 - Command and Scripting Interpreter',
       mitreTactic: d.mitreTactic || 'Execution',
-      sourceIp: d.sourceIp || '198.51.100.44',
-      destIp: d.destIp || '10.0.4.12',
-      asset: d.asset || 'CORE-SERVER-01',
+      sourceIp: d.sourceIp || '',
+      destIp: d.destIp || '',
+      asset: d.asset || '',
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     };
@@ -322,17 +375,8 @@ async function startServer() {
   // -------------------------------------------------------------
   app.get('/api/telemetry', requireAuth, requirePermission('telemetry:read'), ah(async (req, res) => {
     const { history, current } = await store.getTelemetry();
-    res.json({
-      history,
-      current,
-      sensors: [
-        { name: 'DC-PROD-01 (Sysmon)', status: 'online', eps: 142, uptime: '99.98%' },
-        { name: 'SURICATA-NIDS-CORE', status: 'online', eps: 320, uptime: '100%' },
-        { name: 'MODSECURITY-WAF-01', status: 'online', eps: 85, uptime: '99.94%' },
-        { name: 'ZEEK-NETWORK-MON', status: 'online', eps: 210, uptime: '100%' },
-        { name: 'ENDPOINT-CROWDSTRIKE', status: 'warning', eps: 12, uptime: '98.5%' },
-      ]
-    });
+    // No fake sensor fleet — real forwarders appear here as they report in.
+    res.json({ history, current, sensors: [] });
   }));
 
   // Telemetry & Event Ingestion endpoint for forwarders / log shippers
@@ -357,9 +401,9 @@ async function startServer() {
           source: evt.source || evt.sensor || 'Enterprise Log Ingest',
           mitreTechnique: evt.mitreTechnique || 'T1059 - Command and Scripting Interpreter',
           mitreTactic: evt.mitreTactic || 'Execution',
-          sourceIp: evt.sourceIp || evt.src_ip || '192.168.1.50',
-          destIp: evt.destIp || evt.dst_ip || '10.0.0.1',
-          asset: evt.asset || evt.host || 'INGESTED-HOST',
+          sourceIp: evt.sourceIp || evt.src_ip || '',
+          destIp: evt.destIp || evt.dst_ip || '',
+          asset: evt.asset || evt.host || '',
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
         };
@@ -555,11 +599,11 @@ async function startServer() {
     const msg = message.toLowerCase();
     let reply = '';
     if (msg.includes('dns') || msg.includes('tunnel') || msg.includes('cobalt')) {
-      reply = `**Cobalt Strike DNS Tunneling Analysis:**\n- **Technique:** MITRE ATT&CK T1071.004 (DNS Application Layer Protocol).\n- **Behavior:** Look for high-volume TXT/A queries with Shannon entropy > 4.2 directed to external nameservers.\n- **Immediate Containment:**\n  1. Blackhole destination domain \`c2-update-service.xyz\` on local DNS resolvers.\n  2. Isolate host \`10.0.4.12\` at the switch/EDR layer.\n  3. Dump active socket connections via \`netstat -ano\` or \`Get-NetTCPConnection\`.\n  4. Perform volatile memory dump using WinPmem before rebooting.`;
+      reply = `**Cobalt Strike DNS Tunneling Analysis:**\n- **Technique:** MITRE ATT&CK T1071.004 (DNS Application Layer Protocol).\n- **Behavior:** Look for high-volume TXT/A queries with Shannon entropy > 4.2 directed to external nameservers.\n- **Immediate Containment:**\n  1. Blackhole the suspicious destination domain on local DNS resolvers.\n  2. Isolate the affected host at the switch/EDR layer.\n  3. Dump active socket connections via \`netstat -ano\` or \`Get-NetTCPConnection\`.\n  4. Perform volatile memory dump using WinPmem before rebooting.`;
     } else if (msg.includes('lsass') || msg.includes('mimikatz') || msg.includes('dump')) {
-      reply = `**LSASS Memory Dumping Triage (MITRE T1003.001):**\n- **Trigger:** Process memory access to \`lsass.exe\` with rights \`PROCESS_VM_READ\` (0x0010) or \`PROCESS_QUERY_INFORMATION\` (0x0400).\n- **Investigative Steps:**\n  1. Inspect Sysmon Event ID 10 for source binary and call trace.\n  2. Verify if Windows Credential Guard is enabled (\`reg query HKLM\\\\SYSTEM\\\\CurrentControlSet\\\\Control\\\\Lsa /v LsaCfgFlags\`).\n  3. Check C:\\\\Windows\\\\Temp or AppData for dumped \`.dmp\` files.\n  4. Force immediate password reset for all accounts logged into WS-FINANCE-09.`;
+      reply = `**LSASS Memory Dumping Triage (MITRE T1003.001):**\n- **Trigger:** Process memory access to \`lsass.exe\` with rights \`PROCESS_VM_READ\` (0x0010) or \`PROCESS_QUERY_INFORMATION\` (0x0400).\n- **Investigative Steps:**\n  1. Inspect Sysmon Event ID 10 for source binary and call trace.\n  2. Verify if Windows Credential Guard is enabled (\`reg query HKLM\\\\SYSTEM\\\\CurrentControlSet\\\\Control\\\\Lsa /v LsaCfgFlags\`).\n  3. Check C:\\\\Windows\\\\Temp or AppData for dumped \`.dmp\` files.\n  4. Force immediate password reset for all accounts on the affected host.`;
     } else if (msg.includes('sqli') || msg.includes('sql injection')) {
-      reply = `**SQL Injection Containment Playbook (MITRE T1190):**\n- **Vector:** Parameter manipulation on \`/api/v1/checkout\`.\n- **Validation:** Look at web server access logs for SQL keywords (\`UNION\`, \`SELECT\`, \`SLEEP()\`, \`OR 1=1\`).\n- **Remediation:**\n  1. Add strict regex WAF rule blocking \`UNION.*SELECT\` patterns.\n  2. Ensure parameterized queries (Prepared Statements / ORM) in database calls.\n  3. Validate database user privileges to prevent arbitrary \`INTO OUTFILE\` or \`xp_cmdshell\`.`;
+      reply = `**SQL Injection Containment Playbook (MITRE T1190):**\n- **Vector:** Parameter injection in web application input fields / API parameters.\n- **Validation:** Look at web server access logs for SQL keywords (\`UNION\`, \`SELECT\`, \`SLEEP()\`, \`OR 1=1\`).\n- **Remediation:**\n  1. Add strict regex WAF rule blocking \`UNION.*SELECT\` patterns.\n  2. Ensure parameterized queries (Prepared Statements / ORM) in database calls.\n  3. Validate database user privileges to prevent arbitrary \`INTO OUTFILE\` or \`xp_cmdshell\`.`;
     } else {
       reply = `**SOC Analyst Tactical Assessment:**\n- **Analysis:** Based on observed security telemetry, correlate source IP with recent threat intelligence feeds and review endpoint parent-child execution trees.\n- **Recommended Actions:**\n  1. Inspect Windows Event ID 4688 / Sysmon Event ID 1 for process ancestry.\n  2. Cross-reference source hashes against internal blocklists.\n  3. Open a forensic timeline ticket in the DFIR module to track lateral movement.`;
     }
@@ -852,7 +896,9 @@ Description: ${ch.description}${ch.artifactSnippet ? `\nArtifact snippet:\n${ch.
       hintPenalty: 30,
       hintUnlocked: false,
       flag: `FLAG{real_incident_${alert.id.toLowerCase()}_solved}`,
-      artifactSnippet: `[LOG EXTRACT ${alert.created_at}]\nSource: ${alert.sourceIp} -> ${alert.destIp}\nPayload: Base64(FLAG{real_incident_${alert.id.toLowerCase()}_solved})`,
+      // The flag NEVER appears in the snippet — players must extract it from the
+      // described incident, not from the challenge payload.
+      artifactSnippet: `[LOG EXTRACT ${alert.created_at}]\nSource: ${alert.sourceIp} -> ${alert.destIp}\nPayload: [REDACTED — recover via incident analysis]`,
       author: 'SOC Automated Scenario Builder',
     };
 
@@ -954,18 +1000,8 @@ Description: ${ch.description}${ch.artifactSnippet ? `\nArtifact snippet:\n${ch.
     console.log(`[server] storage=${store.kind} redis=${redisUrl ? 'connected' : 'disabled'}`);
   });
 
-  // Background simulation ticker — live telemetry every 5s
-  setInterval(() => {
-    const point = {
-      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
-      eps: Math.floor(450 + Math.random() * 350),
-      networkMbps: Math.floor(110 + Math.random() * 95),
-      cpuUsage: Math.floor(38 + Math.random() * 40),
-      threatsBlocked: Math.floor(3 + Math.random() * 12),
-    };
-    void store.appendTelemetry(point).catch((err) => console.warn('[telemetry] persist failed:', err?.message || err));
-    broadcastSSE('telemetry:live', point);
-  }, 5000);
+  // No simulated telemetry — the platform only records real ingested data.
+  // (The old 5s fake-telemetry ticker was removed with the demo data.)
 
   // Graceful shutdown (docker stop / SIGTERM)
   const shutdown = async () => {

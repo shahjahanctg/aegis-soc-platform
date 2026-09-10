@@ -45,10 +45,10 @@ services:
       JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:-dev-compose-refresh-secret-change-me}
       INGEST_API_KEY: ${INGEST_API_KEY:-}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
-      SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD:-ChangeMe_Admin_2026!}
-      SEED_ANALYST_PASSWORD: ${SEED_ANALYST_PASSWORD:-ChangeMe_Analyst_2026!}
-      SEED_TRAINER_PASSWORD: ${SEED_TRAINER_PASSWORD:-ChangeMe_Trainer_2026!}
-      SEED_VIEWER_PASSWORD: ${SEED_VIEWER_PASSWORD:-ChangeMe_Viewer_2026!}
+      # Initial admin account — provisioned only from env, never seeded.
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?ADMIN_PASSWORD is required}
+      ADMIN_NAME: ${ADMIN_NAME:-Platform Administrator}
     depends_on:
       postgres:
         condition: service_healthy

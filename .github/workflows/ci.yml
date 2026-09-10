@@ -41,11 +41,12 @@ jobs:
         run: docker compose up -d --build
         env:
           INGEST_API_KEY: ci-ingest-key
+          ADMIN_PASSWORD: ci-admin-password
 
       - name: Run API E2E suite
         run: |
           chmod +x scripts/e2e-test.sh
-          BASE_URL=http://localhost INGEST_API_KEY=ci-ingest-key ./scripts/e2e-test.sh
+          BASE_URL=http://localhost ADMIN_PASSWORD=ci-admin-password INGEST_API_KEY=ci-ingest-key ./scripts/e2e-test.sh
 
       - name: Show stack logs on failure
         if: failure()

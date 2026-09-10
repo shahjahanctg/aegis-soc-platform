@@ -13,6 +13,23 @@ export const RefreshSchema = z.object({
   refreshToken: z.string().min(10).max(4096),
 });
 
+export const RoleEnum = z.enum(['admin', 'analyst', 'trainer', 'viewer']);
+
+export const CreateUserSchema = z.object({
+  username: z.string().min(2).max(64).regex(/^[a-zA-Z0-9_.-]+$/, 'Username may only contain letters, numbers, _ . -'),
+  name: z.string().min(1).max(120),
+  password: z.string().min(8).max(256),
+  role: RoleEnum,
+});
+
+export const SettingsUpdateSchema = z.object({
+  alertRetention: z.number().int().min(0).max(1_000_000).optional(),
+  telemetryRetention: z.number().int().min(0).max(1_000_000).optional(),
+  analysisRetention: z.number().int().min(0).max(100_000).optional(),
+  // null clears the configured key; string sets it.
+  geminiApiKey: z.union([z.string().max(512), z.null()]).optional(),
+});
+
 // ---------------------------------------------------------------------------
 // Alerts
 // ---------------------------------------------------------------------------

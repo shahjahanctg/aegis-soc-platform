@@ -45,13 +45,13 @@ export const AISecurityHubView: React.FC<AISecurityHubViewProps> = ({ user }) =>
 
   // Phishing Analyzer State
   const [emailRaw, setEmailRaw] = useState(
-    `Received: from mail-attacker.xyz (unknown [198.51.100.44])\nFrom: "IT Support Helpdesk" <support@microsofft-sec-update.com>\nSubject: CRITICAL: Immediate Password Expiration Action Required\nDate: Mon, 09 Sep 2026 09:15:00 UTC\n\nDear Corporate User,\nYour Office 365 Enterprise credentials will expire in 2 hours. Click below to retain access:\nhttps://microsofft-sec-update.com/login?auth=token994\nFailure to verify will lead to immediate mailbox termination.`
+    `Received: from example-mail-server.com (unknown [203.0.113.10])\nFrom: "IT Support" <support@example.com>\nSubject: Action required\nDate: ${new Date().toUTCString()}\n\nPaste a raw email header or suspicious message here to analyze it for phishing indicators.`
   );
   const [phishingAnalysis, setPhishingAnalysis] = useState<any>(null);
   const [analyzingEmail, setAnalyzingEmail] = useState(false);
 
   // Playbook Generator State
-  const [threatInput, setThreatInput] = useState('Cobalt Strike C2 Beaconing via DNS TXT');
+  const [threatInput, setThreatInput] = useState('');
   const [playbookResult, setPlaybookResult] = useState<string | null>(null);
   const [playbookLoading, setPlaybookLoading] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -80,7 +80,7 @@ export const AISecurityHubView: React.FC<AISecurityHubViewProps> = ({ user }) =>
     try {
       const res = await api.askAICopilot(userMsg.text, {
         analystName: user.name,
-        recentContext: 'Active SOC Alert ALT-1092 Cobalt Strike Beaconing',
+        recentContext: 'Live SOC operations session',
       });
 
       const aiMsg: ChatMessage = {

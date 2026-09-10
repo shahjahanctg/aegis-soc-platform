@@ -14,54 +14,13 @@ interface ThreatArc {
   timestamp: string;
 }
 
-const initialThreatArcs: ThreatArc[] = [
-  { id: 'ARC-1', sourceCity: 'St. Petersburg', sourceCountry: 'RU', sourcePos: [63, 26], targetCity: 'New York HQ', targetCountry: 'US', targetPos: [28, 38], type: 'Cobalt Strike C2 Beacon', severity: 'critical', timestamp: '12s ago' },
-  { id: 'ARC-2', sourceCity: 'Amsterdam', sourceCountry: 'NL', sourcePos: [51, 31], targetCity: 'Frankfurt Datacenter', targetCountry: 'DE', targetPos: [53, 33], type: 'DNS Tunnel Exfiltration', severity: 'high', timestamp: '24s ago' },
-  { id: 'ARC-3', sourceCity: 'Shanghai', sourceCountry: 'CN', sourcePos: [82, 45], targetCity: 'Tokyo Edge', targetCountry: 'JP', targetPos: [87, 42], type: 'Zero-Day SSRF Probe', severity: 'medium', timestamp: '48s ago' },
-  { id: 'ARC-4', sourceCity: 'São Paulo', sourceCountry: 'BR', sourcePos: [36, 75], targetCity: 'New York HQ', targetCountry: 'US', targetPos: [28, 38], type: 'Distributed DDoS SYN Flood', severity: 'high', timestamp: '1m ago' },
-  { id: 'ARC-5', sourceCity: 'Singapore', sourceCountry: 'SG', sourcePos: [78, 62], targetCity: 'Dhaka Regional Hub', targetCountry: 'BD', targetPos: [74, 48], type: 'Credential Stuffing Botnet', severity: 'medium', timestamp: '1m ago' },
-];
+// The threat map renders real alert source geolocation once threat-intel
+// enrichment provides coordinates. No fabricated attack arcs are shown.
+const initialThreatArcs: ThreatArc[] = [];
 
 export const ThreatMapView: React.FC = () => {
   const [arcs, setArcs] = useState<ThreatArc[]>(initialThreatArcs);
-  const [activeArc, setActiveArc] = useState<ThreatArc>(initialThreatArcs[0]);
-
-  // Periodic random attack generation for live feel
-  useEffect(() => {
-    const interval = setInterval(() => {
-      const sources: { city: string; country: string; pos: [number, number] }[] = [
-        { city: 'Bucharest', country: 'RO', pos: [57, 34] },
-        { city: 'Seoul', country: 'KR', pos: [84, 41] },
-        { city: 'Warsaw', country: 'PL', pos: [55, 30] },
-        { city: 'Toronto', country: 'CA', pos: [26, 33] },
-        { city: 'Mumbai', country: 'IN', pos: [71, 52] },
-      ];
-      const types = ['AS-REP Roasting', 'Log4j / Spring4Shell probe', 'WAF SQLi Bypass', 'Malicious PDF Drop', 'Kerberoasting'];
-      const severities: ('critical' | 'high' | 'medium')[] = ['critical', 'high', 'medium'];
-
-      const randomSrc = sources[Math.floor(Math.random() * sources.length)];
-      const randomType = types[Math.floor(Math.random() * types.length)];
-      const randomSev = severities[Math.floor(Math.random() * severities.length)];
-
-      const newArc: ThreatArc = {
-        id: `ARC-${Date.now().toString().slice(-4)}`,
-        sourceCity: randomSrc.city,
-        sourceCountry: randomSrc.country,
-        sourcePos: randomSrc.pos,
-        targetCity: 'Global Core Cloud',
-        targetCountry: 'US-EAST',
-        targetPos: [28, 38],
-        type: randomType,
-        severity: randomSev,
-        timestamp: 'Just now',
-      };
-
-      setArcs(prev => [newArc, ...prev.slice(0, 7)]);
-      setActiveArc(newArc);
-    }, 6000);
-
-    return () => clearInterval(interval);
-  }, []);
+  const [activeArc, setActiveArc] = useState<ThreatArc | null>(null);
 
   return (
     <div className="space-y-4">
@@ -75,9 +34,9 @@ export const ThreatMapView: React.FC = () => {
             Real-time geospatial telemetry tracking adversary origin IPs, botnet nodes, and border ingress strikes.
           </p>
         </div>
-        <div className="flex items-center gap-2 rounded-md bg-rose-950/60 border border-rose-800 px-3 py-1.5 text-xs font-mono text-rose-300">
-          <Radio className="h-3.5 w-3.5 text-rose-400 animate-pulse" />
-          <span>INCOMING ATTACK VECTOR DETECTED</span>
+        <div className="flex items-center gap-2 rounded-md bg-gray-900 border border-gray-800 px-3 py-1.5 text-xs font-mono text-gray-400">
+          <Radio className="h-3.5 w-3.5 text-cyan-400 animate-pulse" />
+          <span>GEO-TELEMETRY FEED READY</span>
         </div>
       </div>
 
@@ -185,27 +144,34 @@ export const ThreatMapView: React.FC = () => {
         </svg>
 
         {/* Floating Active Attack Card */}
-        <div className="absolute bottom-4 left-4 z-10 w-80 rounded-xl border border-gray-800 bg-gray-950/90 p-3.5 backdrop-blur-md font-mono text-xs">
-          <div className="flex items-center justify-between mb-1.5">
-            <span className="text-gray-400 text-[10px] uppercase">Live Threat Vector</span>
-            <span className={`px-2 py-0.2 rounded text-[10px] font-bold uppercase ${
-              activeArc.severity === 'critical' ? 'bg-rose-950 text-rose-300 border border-rose-800' : 'bg-amber-950 text-amber-300 border border-amber-800'
-            }`}>
-              {activeArc.severity}
-            </span>
-          </div>
-          <p className="font-bold text-gray-100 text-sm">{activeArc.type}</p>
-          <div className="mt-2 text-[11px] text-gray-300 space-y-0.5">
-            <div className="flex items-center justify-between">
-              <span className="text-gray-400">Origin:</span>
-              <span className="text-rose-400 font-semibold">{activeArc.sourceCity} ({activeArc.sourceCountry})</span>
+        {activeArc ? (
+          <div className="absolute bottom-4 left-4 z-10 w-80 rounded-xl border border-gray-800 bg-gray-950/90 p-3.5 backdrop-blur-md font-mono text-xs">
+            <div className="flex items-center justify-between mb-1.5">
+              <span className="text-gray-400 text-[10px] uppercase">Live Threat Vector</span>
+              <span className={`px-2 py-0.2 rounded text-[10px] font-bold uppercase ${
+                activeArc.severity === 'critical' ? 'bg-rose-950 text-rose-300 border border-rose-800' : 'bg-amber-950 text-amber-300 border border-amber-800'
+              }`}>
+                {activeArc.severity}
+              </span>
             </div>
-            <div className="flex items-center justify-between">
-              <span className="text-gray-400">Target:</span>
-              <span className="text-cyan-400 font-semibold">{activeArc.targetCity}</span>
+            <p className="font-bold text-gray-100 text-sm">{activeArc.type}</p>
+            <div className="mt-2 text-[11px] text-gray-300 space-y-0.5">
+              <div className="flex items-center justify-between">
+                <span className="text-gray-400">Origin:</span>
+                <span className="text-rose-400 font-semibold">{activeArc.sourceCity} ({activeArc.sourceCountry})</span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-gray-400">Target:</span>
+                <span className="text-cyan-400 font-semibold">{activeArc.targetCity}</span>
+              </div>
             </div>
           </div>
-        </div>
+        ) : (
+          <div className="absolute bottom-4 left-4 z-10 w-80 rounded-xl border border-gray-800 bg-gray-950/90 p-3.5 backdrop-blur-md font-mono text-xs text-gray-400">
+            <p className="text-[10px] uppercase tracking-wider">Live Threat Vector</p>
+            <p className="mt-1 text-[11px]">No attack arcs yet — arcs appear once real alerts carry geolocated source/target data.</p>
+          </div>
+        )}
 
         {/* Feed List */}
         <div className="absolute top-4 right-4 z-10 hidden md:block w-72 max-h-[360px] overflow-y-auto rounded-xl border border-gray-800 bg-gray-950/90 p-3 backdrop-blur-md font-mono text-xs">
@@ -217,12 +183,15 @@ export const ThreatMapView: React.FC = () => {
           </div>
 
           <div className="space-y-2">
+            {arcs.length === 0 && (
+              <p className="text-[11px] text-gray-500 py-2">Attack stream empty — no geolocated threat arcs from current alert data.</p>
+            )}
             {arcs.map(arc => (
               <div
                 key={arc.id}
                 onClick={() => setActiveArc(arc)}
                 className={`p-2 rounded-lg border transition-all cursor-pointer ${
-                  activeArc.id === arc.id ? 'bg-gray-900 border-cyan-500/70 text-cyan-300' : 'bg-gray-950/60 border-gray-800/80 text-gray-300 hover:bg-gray-900/40'
+                  activeArc?.id === arc.id ? 'bg-gray-900 border-cyan-500/70 text-cyan-300' : 'bg-gray-950/60 border-gray-800/80 text-gray-300 hover:bg-gray-900/40'
                 }`}
               >
                 <div className="flex items-center justify-between text-[10px] mb-0.5">

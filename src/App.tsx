@@ -13,6 +13,7 @@ import { TrainingView } from './components/training/TrainingView';
 import { CTFArenaView } from './components/ctf/CTFArenaView';
 import { AISecurityHubView } from './components/ai/AISecurityHubView';
 import { DFIRTimelineView } from './components/dfir/DFIRTimelineView';
+import { SettingsView } from './components/settings/SettingsView';
 
 import { ActiveModule, Alert, IOC, UserSession, AnalysisRun } from './types';
 import { api } from './services/api';
@@ -64,7 +65,8 @@ export default function App() {
     }
   };
 
-  // Initial fetch (only when authenticated)
+  // Initial fetch — keyed on accessToken so data loads once the session exists
+  // (previously [] deps meant it ran before login and never re-ran).
   useEffect(() => {
     if (!accessToken) return;
     const initData = async () => {
@@ -87,10 +89,12 @@ export default function App() {
       }
     };
     initData();
-  }, []);
+  }, [accessToken]);
 
-  // Server-Sent Events listener for real-time telemetry and injected alerts
+  // Server-Sent Events listener — reconnects with the token once logged in so
+  // newly ingested/analyzed alerts update the live totals.
   useEffect(() => {
+    if (!accessToken) return;
     const sse = api.getTelemetryEventSource();
 
     sse.onmessage = (event) => {
@@ -114,7 +118,7 @@ export default function App() {
     return () => {
       sse.close();
     };
-  }, []);
+  }, [accessToken]);
 
   // Handler for completed log analysis runs
   const handleAnalysisComplete = (run: AnalysisRun) => {
@@ -248,6 +252,9 @@ export default function App() {
 
         {/* MODULE 5: Digital Forensics & Incident Response (DFIR) */}
         {activeModule === 'dfir' && <DFIRTimelineView />}
+
+        {/* MODULE 6: Settings — user management, retention, Gemini key (admin) */}
+        {activeModule === 'settings' && <SettingsView user={user} />}
       </main>
 
       {/* Footer Status Bar */}

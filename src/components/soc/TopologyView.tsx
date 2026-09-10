@@ -216,7 +216,7 @@ export const TopologyView: React.FC = () => {
           </div>
           <div className="flex items-center gap-2 text-rose-400">
             <span className="h-2.5 w-2.5 rounded-full bg-rose-400 animate-ping" />
-            <span>Active Intrusion (Cobalt Strike)</span>
+            <span>Active Intrusion</span>
           </div>
         </div>
 
@@ -294,10 +294,10 @@ export const TopologyView: React.FC = () => {
                 <div className="rounded-lg border border-rose-900/60 bg-rose-950/20 p-3 text-xs font-mono text-rose-300">
                   <div className="flex items-center gap-1.5 font-bold mb-1">
                     <AlertCircle className="h-4 w-4 text-rose-400" />
-                    ALERT CORRELATION: Cobalt Strike C2 Beaconing (ALT-1092)
+                    COMPROMISED HOST — ACTIVE INTRUSION
                   </div>
                   <p className="text-[11px] text-gray-300">
-                    High-entropy DNS TXT queries observed escaping to 185.220.101.5. Memory inspection shows anomalous thread in svchost.exe.
+                    Correlate live alerts against this asset in the SOC dashboard — isolate at the switch/EDR layer and preserve volatile memory.
                   </p>
                 </div>
               ) : selectedNode.status === 'warning' ? (

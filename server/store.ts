@@ -1,12 +1,8 @@
 import crypto from 'crypto';
 import { Pool } from 'pg';
-import { addAlertBounded, MAX_ALERTS } from './alertsStore';
-import type { SafeUser } from './security';
+import { addAlertBounded } from './alertsStore';
+import type { SafeUser, Role } from './security';
 import type { AuditEntry } from './audit';
-import {
-  seedAlerts, seedIocs, seedCourses, seedPhishingCampaigns,
-  seedCtfChallenges, seedCtfLeaderboard, seedDfirTimeline, makeSeedTelemetry,
-} from './seed';
 import type {
   AlertItem, IOCItem, CourseItem, CourseLesson, PhishingCampaignItem,
   CTFChallengeItem, LeaderboardEntry, DFIRTimelineEvent, TelemetryPoint,
@@ -64,6 +60,11 @@ export interface Store {
   // users
   verifyPassword(username: string, password: string): Promise<SafeUser | null>;
   findUserById(id: string): Promise<SafeUser | null>;
+  listUsers(): Promise<ManagedUser[]>;
+  createUser(input: { username: string; name: string; password: string; role: Role }): Promise<ManagedUser>;
+  // settings
+  getSettings(): Promise<StoredSettings>;
+  updateSettings(patch: Partial<StoredSettings>): Promise<StoredSettings>;
   // audit
   recordAudit(entry: AuditEntry): Promise<void>;
   getAuditLog(limit: number): Promise<AuditEntry[]>;
@@ -101,12 +102,26 @@ export interface Store {
 }
 
 // ---------------------------------------------------------------------------
-// Shared user helpers (scrypt hashing + seeded users)
+// Shared user helpers (scrypt hashing + env-driven admin bootstrap)
+//
+// No demo users are ever created. On a fresh database the single admin
+// account is provisioned from ADMIN_USERNAME / ADMIN_PASSWORD env vars
+// (ADMIN_NAME optional). Additional role-based accounts are created by an
+// admin from the Settings page (POST /api/users).
 // ---------------------------------------------------------------------------
 
-interface UserRecord extends SafeUser {
+export interface UserRecord extends SafeUser {
   passwordSalt: string;
   passwordHash: string;
+  score: number;
+}
+
+export interface ManagedUser {
+  id: string;
+  username: string;
+  name: string;
+  role: Role;
+  badge?: string;
   score: number;
 }
 
@@ -118,30 +133,74 @@ function timingSafeEqualHex(a: string, b: string): boolean {
   return a.length === b.length && crypto.timingSafeEqual(Buffer.from(a, 'hex'), Buffer.from(b, 'hex'));
 }
 
-export function makeSeedUsers(): UserRecord[] {
-  const defs: Array<{ username: string; name: string; password: string; role: SafeUser['role']; badge?: string }> = [
-    { username: 'admin', name: 'Platform Administrator', password: process.env.SEED_ADMIN_PASSWORD || 'ChangeMe_Admin_2026!', role: 'admin', badge: 'Commander' },
-    { username: 'analyst', name: 'Lead SOC Analyst', password: process.env.SEED_ANALYST_PASSWORD || 'ChangeMe_Analyst_2026!', role: 'analyst', badge: 'Lead Defender' },
-    { username: 'trainer', name: 'Training Coordinator', password: process.env.SEED_TRAINER_PASSWORD || 'ChangeMe_Trainer_2026!', role: 'trainer', badge: 'Instructor' },
-    { username: 'viewer', name: 'Read-Only Auditor', password: process.env.SEED_VIEWER_PASSWORD || 'ChangeMe_Viewer_2026!', role: 'viewer', badge: 'Observer' },
-  ];
-  return defs.map((u) => {
-    const passwordSalt = crypto.randomBytes(16).toString('hex');
-    return {
-      id: `usr-${crypto.randomUUID().slice(0, 8)}`,
-      username: u.username,
-      name: u.name,
-      role: u.role,
-      badge: u.badge,
-      passwordSalt,
-      passwordHash: scryptHash(u.password, passwordSalt),
-      score: 0,
-    };
-  });
+export function hashPassword(password: string): { salt: string; hash: string } {
+  const salt = crypto.randomBytes(16).toString('hex');
+  return { salt, hash: scryptHash(password, salt) };
+}
+
+/** Creates the bootstrap admin from env. Throws in production when ADMIN_PASSWORD is missing. */
+export function makeAdminUser(): UserRecord {
+  const username = (process.env.ADMIN_USERNAME || 'admin').trim().toLowerCase();
+  const password = process.env.ADMIN_PASSWORD;
+  if (!password) {
+    throw new Error('ADMIN_PASSWORD must be set to provision the initial admin account');
+  }
+  const { salt, hash } = hashPassword(password);
+  return {
+    id: `usr-${crypto.randomUUID().slice(0, 8)}`,
+    username,
+    name: (process.env.ADMIN_NAME || 'Platform Administrator').trim(),
+    role: 'admin',
+    badge: 'Commander',
+    passwordSalt: salt,
+    passwordHash: hash,
+    score: 0,
+  };
+}
+
+export function makeUser(username: string, name: string, password: string, role: Role): UserRecord {
+  const { salt, hash } = hashPassword(password);
+  return {
+    id: `usr-${crypto.randomUUID().slice(0, 8)}`,
+    username: username.trim().toLowerCase(),
+    name: name.trim(),
+    role,
+    passwordSalt: salt,
+    passwordHash: hash,
+    score: 0,
+  };
 }
 
 function toSafeUser(u: UserRecord): SafeUser {
   return { id: u.id, username: u.username, name: u.name, role: u.role, badge: u.badge, score: u.score };
+}
+
+// ---------------------------------------------------------------------------
+// Platform settings (log retention + Gemini API key). Admin-managed via
+// GET/PUT /api/settings; defaults apply when nothing is stored yet.
+// ---------------------------------------------------------------------------
+
+export interface StoredSettings {
+  alertRetention: number;
+  telemetryRetention: number;
+  analysisRetention: number;
+  geminiApiKey: string | null;
+}
+
+export const DEFAULT_SETTINGS: StoredSettings = {
+  alertRetention: 2000,
+  telemetryRetention: 2000,
+  analysisRetention: 500,
+  geminiApiKey: null,
+};
+
+export function publicSettings(s: StoredSettings) {
+  return {
+    alertRetention: s.alertRetention,
+    telemetryRetention: s.telemetryRetention,
+    analysisRetention: s.analysisRetention,
+    geminiConfigured: !!s.geminiApiKey,
+  };
 }
 
 function emptyStats(): AlertStats {
@@ -160,7 +219,6 @@ class MemoryStore implements Store {
   private courses: CourseItem[];
   private campaigns: PhishingCampaignItem[];
   private challenges: CTFChallengeItem[];
-  private leaderboard: LeaderboardEntry[];
   private dfir: DFIRTimelineEvent[];
   private telemetry: TelemetryPoint[];
   private memoryAudit: AuditEntry[] = [];
@@ -170,16 +228,19 @@ class MemoryStore implements Store {
   private hintKeys = new Set<string>();          // `${userId}:${challengeId}`
   private lastSolvedAt = new Map<string, string>(); // `${userId}:${challengeId}` -> ISO timestamp
 
+  private settings: StoredSettings;
+
   constructor() {
-    this.users = makeSeedUsers();
-    this.alerts = [...seedAlerts];
-    this.iocs = [...seedIocs];
-    this.courses = [...seedCourses];
-    this.campaigns = [...seedPhishingCampaigns];
-    this.challenges = [...seedCtfChallenges];
-    this.leaderboard = seedCtfLeaderboard.map((e) => ({ ...e }));
-    this.dfir = [...seedDfirTimeline];
-    this.telemetry = makeSeedTelemetry();
+    // No demo data — start empty, with only the env-provisioned admin.
+    this.users = [makeAdminUser()];
+    this.alerts = [];
+    this.iocs = [];
+    this.courses = [];
+    this.campaigns = [];
+    this.challenges = [];
+    this.dfir = [];
+    this.telemetry = [];
+    this.settings = { ...DEFAULT_SETTINGS };
   }
 
   async health(): Promise<boolean> { return true; }
@@ -196,6 +257,28 @@ class MemoryStore implements Store {
   async findUserById(id: string): Promise<SafeUser | null> {
     const user = this.users.find((u) => u.id === id);
     return user ? toSafeUser(user) : null;
+  }
+
+  async listUsers(): Promise<ManagedUser[]> {
+    return this.users.map((u) => ({ id: u.id, username: u.username, name: u.name, role: u.role, badge: u.badge, score: u.score }));
+  }
+
+  async createUser(input: { username: string; name: string; password: string; role: Role }): Promise<ManagedUser> {
+    if (this.users.some((u) => u.username === input.username.trim().toLowerCase())) {
+      throw new Error('USERNAME_TAKEN');
+    }
+    const user = makeUser(input.username, input.name, input.password, input.role);
+    this.users.push(user);
+    return { id: user.id, username: user.username, name: user.name, role: user.role, badge: user.badge, score: 0 };
+  }
+
+  async getSettings(): Promise<StoredSettings> {
+    return { ...this.settings };
+  }
+
+  async updateSettings(patch: Partial<StoredSettings>): Promise<StoredSettings> {
+    this.settings = { ...this.settings, ...patch };
+    return { ...this.settings };
   }
 
   async recordAudit(entry: AuditEntry): Promise<void> {
@@ -368,9 +451,6 @@ class MemoryStore implements Store {
   }
 
   async getLeaderboard(): Promise<LeaderboardEntry[]> {
-    const bots = this.leaderboard
-      .filter((l) => l.country !== 'LOCAL')
-      .map((e) => ({ ...e, username: e.team, solvedCount: e.solves }));
     const users: LeaderboardEntry[] = this.users
       .filter((u) => u.score > 0)
       .map((u) => {
@@ -385,7 +465,7 @@ class MemoryStore implements Store {
           avatar: '🛡️', country: 'ORG',
         };
       });
-    return this.rankEntries([...users, ...bots]);
+    return this.rankEntries(users);
   }
 
   async listDfirEvents(): Promise<DFIRTimelineEvent[]> { return [...this.dfir]; }
@@ -522,10 +602,14 @@ CREATE TABLE IF NOT EXISTS analysis_events (
 );
 CREATE INDEX IF NOT EXISTS idx_analysis_events_run ON analysis_events(run_id);
 CREATE INDEX IF NOT EXISTS idx_analysis_runs_created ON analysis_runs(created_at DESC);
-`;
 
-const ALERT_RETENTION = 2000; // bound alerts table growth
-const TELEMETRY_RETENTION = 2000;
+-- Platform settings (log retention + Gemini API key), admin-managed.
+CREATE TABLE IF NOT EXISTS settings (
+  key TEXT PRIMARY KEY,
+  value JSONB NOT NULL
+);
+INSERT INTO settings (key, value) VALUES ('platform', '{}'::jsonb) ON CONFLICT (key) DO NOTHING;
+`;
 
 interface AlertRow {
   id: string;
@@ -580,7 +664,7 @@ class PostgresStore implements Store {
     });
   }
 
-  /** Connect (with retries), create schema, seed demo data on first boot. */
+  /** Connect (with retries), create schema, provision the admin on first boot. */
   async init(): Promise<void> {
     let connected = false;
     for (let attempt = 1; attempt <= 15 && !connected; attempt++) {
@@ -599,7 +683,7 @@ class PostgresStore implements Store {
     }
 
     await this.pool.query(SCHEMA_SQL);
-    await this.seedIfEmpty();
+    await this.provisionAdminIfEmpty();
     console.log(`[store] Postgres store ready at ${process.env.DATABASE_URL?.split('@').pop()}`);
   }
 
@@ -607,54 +691,16 @@ class PostgresStore implements Store {
     await this.pool.end();
   }
 
-  private async seedIfEmpty(): Promise<void> {
-    const isEmpty = async (table: string) => {
-      const r = await this.pool.query(`SELECT COUNT(*) AS c FROM ${table}`);
-      return Number(r.rows[0].c) === 0;
-    };
-
-    if (await isEmpty('users')) {
-      for (const u of makeSeedUsers()) {
-        await this.pool.query(
-          `INSERT INTO users (id, username, name, role, badge, password_salt, password_hash) VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-          [u.id, u.username, u.name, u.role, u.badge ?? null, u.passwordSalt, u.passwordHash],
-        );
-      }
-      console.log('[store] seeded 4 users (admin/analyst/trainer/viewer)');
-    }
-
-    if (await isEmpty('alerts')) {
-      for (const a of seedAlerts) await this.insertAlertRow(a);
-      console.log(`[store] seeded ${seedAlerts.length} alerts`);
-    }
-
-    // Generic JSONB tables. The leaderboard uses `country` as its stable id.
-    const jsonTables: Array<[string, unknown[], (row: any) => string]> = [
-      ['iocs', seedIocs, (r) => r.id],
-      ['courses', seedCourses, (r) => r.id],
-      ['phishing_campaigns', seedPhishingCampaigns, (r) => r.id],
-      ['ctf_challenges', seedCtfChallenges, (r) => r.id],
-      ['ctf_leaderboard', seedCtfLeaderboard, (r) => r.country],
-      ['dfir_timeline', seedDfirTimeline, (r) => r.id],
-    ];
-    for (const [table, rows, idOf] of jsonTables) {
-      if (await isEmpty(table)) {
-        for (const row of rows) {
-          await this.pool.query(
-            `INSERT INTO ${table} (id, data) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING`,
-            [idOf(row), JSON.stringify(row)],
-          );
-        }
-        console.log(`[store] seeded ${rows.length} ${table}`);
-      }
-    }
-
-    if (await isEmpty('telemetry')) {
-      for (const p of makeSeedTelemetry()) {
-        await this.pool.query('INSERT INTO telemetry (data) VALUES ($1)', [JSON.stringify(p)]);
-      }
-      console.log('[store] seeded telemetry history');
-    }
+  /** No demo data is seeded — only the env-provisioned admin account on a fresh database. */
+  private async provisionAdminIfEmpty(): Promise<void> {
+    const r = await this.pool.query('SELECT COUNT(*) AS c FROM users');
+    if (Number(r.rows[0].c) > 0) return;
+    const admin = makeAdminUser();
+    await this.pool.query(
+      `INSERT INTO users (id, username, name, role, badge, password_salt, password_hash) VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+      [admin.id, admin.username, admin.name, admin.role, admin.badge ?? null, admin.passwordSalt, admin.passwordHash],
+    );
+    console.log(`[store] provisioned admin account '${admin.username}' (no demo data)`);
   }
 
   async health(): Promise<boolean> {
@@ -688,6 +734,48 @@ class PostgresStore implements Store {
     const row = r.rows[0];
     if (!row) return null;
     return { id: row.id, username: row.username, name: row.name, role: row.role, badge: row.badge ?? undefined, score: row.score };
+  }
+
+  async listUsers(): Promise<ManagedUser[]> {
+    const r = await this.pool.query(
+      'SELECT id, username, name, role, badge, score FROM users ORDER BY created_at ASC',
+    );
+    return r.rows.map((row: any) => ({
+      id: row.id, username: row.username, name: row.name,
+      role: row.role, badge: row.badge ?? undefined, score: row.score,
+    }));
+  }
+
+  async createUser(input: { username: string; name: string; password: string; role: Role }): Promise<ManagedUser> {
+    const user = makeUser(input.username, input.name, input.password, input.role);
+    try {
+      await this.pool.query(
+        `INSERT INTO users (id, username, name, role, badge, password_salt, password_hash) VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+        [user.id, user.username, user.name, user.role, user.badge ?? null, user.passwordSalt, user.passwordHash],
+      );
+    } catch (err: any) {
+      if (String(err?.code).startsWith('23')) throw new Error('USERNAME_TAKEN'); // unique violation
+      throw err;
+    }
+    return { id: user.id, username: user.username, name: user.name, role: user.role, badge: user.badge, score: 0 };
+  }
+
+  // -- settings -------------------------------------------------------------
+
+  async getSettings(): Promise<StoredSettings> {
+    const r = await this.pool.query(`SELECT value FROM settings WHERE key = 'platform'`);
+    const stored = (r.rows[0]?.value ?? {}) as Partial<StoredSettings>;
+    return { ...DEFAULT_SETTINGS, ...stored };
+  }
+
+  async updateSettings(patch: Partial<StoredSettings>): Promise<StoredSettings> {
+    const current = await this.getSettings();
+    const next = { ...current, ...patch };
+    await this.pool.query(
+      `INSERT INTO settings (key, value) VALUES ('platform', $1) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+      [JSON.stringify(next)],
+    );
+    return next;
   }
 
   // -- audit ----------------------------------------------------------------
@@ -744,8 +832,11 @@ class PostgresStore implements Store {
   }
 
   private async pruneAlerts(): Promise<void> {
+    const { alertRetention } = await this.getSettings();
+    if (alertRetention <= 0) return;
     await this.pool.query(
-      `DELETE FROM alerts WHERE id IN (SELECT id FROM alerts ORDER BY created_at DESC OFFSET ${ALERT_RETENTION})`,
+      `DELETE FROM alerts WHERE id IN (SELECT id FROM alerts ORDER BY created_at DESC OFFSET $1)`,
+      [alertRetention],
     );
   }
 
@@ -843,9 +934,13 @@ class PostgresStore implements Store {
 
   async appendTelemetry(point: TelemetryPoint): Promise<void> {
     await this.pool.query('INSERT INTO telemetry (data) VALUES ($1)', [JSON.stringify(point)]);
-    await this.pool.query(
-      `DELETE FROM telemetry WHERE id IN (SELECT id FROM telemetry ORDER BY id DESC OFFSET ${TELEMETRY_RETENTION})`,
-    );
+    const { telemetryRetention } = await this.getSettings();
+    if (telemetryRetention > 0) {
+      await this.pool.query(
+        `DELETE FROM telemetry WHERE id IN (SELECT id FROM telemetry ORDER BY id DESC OFFSET $1)`,
+        [telemetryRetention],
+      );
+    }
   }
 
   // -- training -------------------------------------------------------------
@@ -969,29 +1064,22 @@ class PostgresStore implements Store {
   }
 
   async getLeaderboard(): Promise<LeaderboardEntry[]> {
-    // Real platform users (with at least one solve or a score) + seeded bot teams.
-    const [usersR, botsR] = await Promise.all([
-      this.pool.query(`
-        SELECT u.name, u.score,
-          (SELECT COUNT(*) FROM user_solves s WHERE s.user_id = u.id)::int AS solves,
-          (SELECT MAX(solved_at) FROM user_solves s WHERE s.user_id = u.id) AS last_solved
-        FROM users u
-        WHERE u.score > 0 OR EXISTS (SELECT 1 FROM user_solves s WHERE s.user_id = u.id)
-        ORDER BY u.score DESC, u.name
-      `),
-      this.pool.query('SELECT data FROM ctf_leaderboard'),
-    ]);
+    // Real platform users only — bot teams and demo entries were removed.
+    const usersR = await this.pool.query(`
+      SELECT u.name, u.score,
+        (SELECT COUNT(*) FROM user_solves s WHERE s.user_id = u.id)::int AS solves,
+        (SELECT MAX(solved_at) FROM user_solves s WHERE s.user_id = u.id) AS last_solved
+      FROM users u
+      WHERE u.score > 0 OR EXISTS (SELECT 1 FROM user_solves s WHERE s.user_id = u.id)
+      ORDER BY u.score DESC, u.name
+    `);
     const users: LeaderboardEntry[] = usersR.rows.map((row: any) => ({
       rank: 0, team: row.name, username: row.name, score: row.score,
       solves: row.solves, solvedCount: row.solves,
       lastSolved: row.last_solved ? new Date(row.last_solved).toLocaleDateString() : undefined,
       avatar: '🛡️', country: 'ORG',
     }));
-    const bots: LeaderboardEntry[] = (botsR.rows as any[])
-      .map((r) => r.data as LeaderboardEntry)
-      .filter((e) => e.country !== 'LOCAL')
-      .map((e) => ({ ...e, username: e.team, solvedCount: e.solves }));
-    return this.sortAndRank([...users, ...bots]);
+    return this.sortAndRank(users);
   }
 
   // -- dfir -----------------------------------------------------------------
@@ -1017,6 +1105,14 @@ class PostgresStore implements Store {
       await this.pool.query(
         'INSERT INTO analysis_events (id, run_id, data) VALUES ($1,$2,$3)',
         [`${run.id}-${crypto.randomUUID().slice(0, 8)}`, run.id, JSON.stringify(e)],
+      );
+    }
+    // Enforce configurable retention on analysis runs.
+    const { analysisRetention } = await this.getSettings();
+    if (analysisRetention > 0) {
+      await this.pool.query(
+        `DELETE FROM analysis_runs WHERE id IN (SELECT id FROM analysis_runs ORDER BY created_at DESC OFFSET $1)`,
+        [analysisRetention],
       );
     }
   }

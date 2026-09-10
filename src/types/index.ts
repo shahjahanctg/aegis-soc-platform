@@ -1,4 +1,4 @@
-export type ActiveModule = 'soc' | 'training' | 'ctf' | 'ai' | 'dfir';
+export type ActiveModule = 'soc' | 'training' | 'ctf' | 'ai' | 'dfir' | 'settings';
 export type AlertSeverity = 'low' | 'medium' | 'high' | 'critical';
 export type AlertStatus = 'new' | 'triaged' | 'investigating' | 'resolved';
 
@@ -248,4 +248,20 @@ export interface AnalysisRunSummary {
 
 export interface AnalysisRunDetail extends AnalysisRun {
   events: AnalysisEvent[];
+}
+
+export interface ManagedUser {
+  id: string;
+  username: string;
+  name: string;
+  role: 'admin' | 'analyst' | 'trainer' | 'viewer';
+  badge?: string;
+  score: number;
+}
+
+export interface AppSettings {
+  alertRetention: number;
+  telemetryRetention: number;
+  analysisRetention: number;
+  geminiConfigured: boolean;
 }

@@ -133,25 +133,27 @@ GEMINI_API_KEY=your_gemini_api_key_here
 INGEST_API_KEY=
 ```
 
-> **Persistence:** with `DATABASE_URL` set, the server provisions its schema and seed data automatically on first boot (users, alerts, IOCs, courses, CTF challenges, DFIR timeline, audit log — all stored in PostgreSQL). Without it, the app falls back to an in-memory store for local development (data resets on restart). `REDIS_URL` enables cross-replica SSE fan-out and shared rate limiting; both degrade gracefully when unreachable.
+> **Persistence:** with `DATABASE_URL` set, the server provisions its schema automatically on first boot and stores all data in PostgreSQL. **No demo data is ever seeded** — the platform starts empty with a single admin account provisioned from env vars. Without `DATABASE_URL`, the app falls back to an in-memory store for local development (data resets on restart). `REDIS_URL` enables cross-replica SSE fan-out and shared rate limiting; both degrade gracefully when unreachable.
 
 ### Authentication & RBAC
 All API endpoints require a JWT (15-minute access token, 7-day refresh token, scrypt-hashed passwords). Four roles are enforced server-side:
 
-| Role | Username (seeded) | Capabilities |
-| :--- | :--- | :--- |
-| Admin | `admin` | Full control, audit log access |
-| SOC Analyst | `analyst` | Alert triage, IOC management, CTF, AI copilot, ingest |
-| Trainer | `trainer` | LMS content, phishing campaigns, CTF management |
-| Viewer | `viewer` | Read-only dashboards |
+| Role | Capabilities |
+| :--- | :--- |
+| Admin | Full control, user management, settings, audit log access |
+| SOC Analyst | Alert triage, IOC management, CTF, AI copilot, ingest |
+| Trainer | LMS content, phishing campaigns, CTF management |
+| Viewer | Read-only dashboards |
 
-Seeded passwords default to `ChangeMe_<Role>_2026!` (e.g. `ChangeMe_Admin_2026!`) and can be overridden via `SEED_*_PASSWORD` env vars. Every security-relevant action is written to an append-only audit trail (`GET /api/audit`, admin only) and streamed live over SSE.
+**No demo accounts exist.** On first boot the platform provisions exactly one admin from `ADMIN_USERNAME` / `ADMIN_PASSWORD` env vars (`ADMIN_NAME` optional); it refuses to start in production without `ADMIN_PASSWORD`. Additional role-based accounts are created by the admin from **Settings → User Management** (`GET/POST /api/users`). Every security-relevant action is written to an append-only audit trail (`GET /api/audit`, admin only) and streamed live over SSE.
 
 **Machine ingestion (rsyslog / Vector):** set `INGEST_API_KEY` in `.env` and send it as the `x-api-key` header — no user token required. The AegisSOC UI's Syslog Ingest test view authenticates with your logged-in session instead.
 
 **CTF integrity:** flags are never sent to the browser — submissions are validated server-side only.
 
-**Per-user progress (Phase 2):** lesson completions, CTF solves, hint unlocks, and scores are tracked per user in PostgreSQL (`user_progress`, `user_solves`, `user_hints`, `users.score`). Two analysts see independent course progress and challenge states; CTF points are awarded once per user (hint penalties included) and the leaderboard ranks real platform users alongside seeded bot teams. Scores/solves are returned in login and `/api/auth/me` responses.
+**Per-user progress (Phase 2):** lesson completions, CTF solves, hint unlocks, and scores are tracked per user in PostgreSQL (`user_progress`, `user_solves`, `user_hints`, `users.score`). Two analysts see independent course progress and challenge states; CTF points are awarded once per user (hint penalties included) and the leaderboard ranks real platform users only (no bot teams). Scores/solves are returned in login and `/api/auth/me` responses.
+
+**Admin settings (Settings module):** admins manage role-based accounts (`/api/users`), configure log/data retention (`/api/settings`: alerts, telemetry, analysis runs), and set or rotate the Gemini API key at runtime — no restart required. The key is stored server-side and never returned to clients.
 
 **Zero-training-data AI (Phase 3):** no ML training anywhere. Gemini output (triage verdicts, phishing analysis, CTF hints) is schema-validated with zod before it is trusted or persisted — invalid output falls back to deterministic engines. New `/api/ai/anomaly` runs rolling z-score anomaly detection on live telemetry; `/api/ai/correlate` clusters related alerts by MITRE technique + source IP within a time window; `/api/ai/ctf-hint` generates LLM nudges from public challenge metadata only (flags never enter prompts or responses). The email analyzer parses real SPF/DKIM/DMARC headers when no API key is configured.
 
@@ -199,11 +201,13 @@ Environment for the stack is read from your shell (or a `.env` file in the repo 
 | `POSTGRES_PASSWORD` | `aegis_dev_password` | Set a strong value before first `up` |
 | `JWT_ACCESS_SECRET` / `JWT_REFRESH_SECRET` | dev placeholders | **Set real values** (`openssl rand -base64 48`) |
 | `INGEST_API_KEY` | — | API key for log forwarders |
-| `GEMINI_API_KEY` | — | Enables AI copilot features |
-| `SEED_*_PASSWORD` | `ChangeMe_<Role>_2026!` | Override seeded demo passwords |
+| `GEMINI_API_KEY` | — | Enables AI copilot features (also settable at runtime in Settings) |
+| `ADMIN_USERNAME` | `admin` | Initial admin username (provisioned on first boot) |
+| `ADMIN_PASSWORD` | **required** | Initial admin password — no demo users are seeded |
+| `ADMIN_NAME` | `Platform Administrator` | Display name for the initial admin |
 | `HTTP_PORT` | `80` | Host port for nginx |
 
-> **First boot** creates the schema and seeds demo data automatically. The container waits for PostgreSQL to be healthy, then the app connects, seeds, and serves. CTF flags remain server-side only; audit events are persisted to `audit_log` and streamed live.
+> **First boot** provisions the schema and the single env-configured admin account — no demo data. The container waits for PostgreSQL to be healthy, then the app connects, provisions, and serves. CTF flags remain server-side only; audit events are persisted to `audit_log` and streamed live.
 
 ---
 
@@ -489,6 +493,8 @@ Restart=on-failure
 Environment=NODE_ENV=production
 Environment=PORT=3000
 Environment=GEMINI_API_KEY=your_gemini_api_key_here
+Environment=ADMIN_USERNAME=admin
+Environment=ADMIN_PASSWORD=your-strong-admin-password
 
 [Install]
 WantedBy=multi-user.target

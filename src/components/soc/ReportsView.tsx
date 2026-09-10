@@ -14,14 +14,16 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ alerts }) => {
   const criticalCount = safeAlerts.filter(a => a.severity === 'critical').length;
   const highCount = safeAlerts.filter(a => a.severity === 'high').length;
   const resolvedCount = safeAlerts.filter(a => a.status === 'resolved').length;
-  const mttd = '4.2 minutes'; // Mean Time to Detect
-  const mttr = '18.5 minutes'; // Mean Time to Respond
+  // Metrics below are computed from real alert data when available; no
+  // fabricated posture numbers are shown for an empty platform.
+  const mttd = '—'; // Mean Time to Detect (needs timestamps + detection events)
+  const mttr = '—'; // Mean Time to Respond (needs triage timestamps)
 
   const handleExport = () => {
     const reportData = {
       title: `${reportType.toUpperCase()} SOC INCIDENT & READINESS REPORT`,
       generatedAt: new Date().toISOString(),
-      securityPostureScore: '89/100 (HIGH)',
+      securityPostureScore: safeAlerts.length ? `${Math.max(0, Math.min(100, 100 - (criticalCount * 8 + highCount * 4 + Math.max(0, safeAlerts.length - resolvedCount))))}/100` : 'n/a',
       summary: {
         totalIncidents: safeAlerts.length,
         critical: criticalCount,
@@ -137,30 +139,32 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ alerts }) => {
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3 font-mono text-xs">
               <div className="rounded-xl border border-gray-800 bg-gray-900/50 p-3.5">
                 <span className="text-gray-400 block">Overall Posture Rating</span>
-                <span className="text-xl font-bold text-emerald-400 mt-1 block">89 / 100</span>
-                <span className="text-[10px] text-emerald-400">HARDENED</span>
+                <span className="text-xl font-bold text-emerald-400 mt-1 block">{safeAlerts.length ? `${Math.max(0, Math.min(100, 100 - (criticalCount * 8 + highCount * 4 + Math.max(0, safeAlerts.length - resolvedCount))))} / 100` : 'n/a'}</span>
+                <span className="text-[10px] text-emerald-400">{safeAlerts.length ? 'COMPUTED FROM LIVE ALERTS' : 'NO ALERT DATA'}</span>
               </div>
               <div className="rounded-xl border border-gray-800 bg-gray-900/50 p-3.5">
                 <span className="text-gray-400 block">Mean Time to Detect (MTTD)</span>
                 <span className="text-xl font-bold text-cyan-400 mt-1 block">{mttd}</span>
-                <span className="text-[10px] text-gray-500">&minus;35% from last month</span>
+                <span className="text-[10px] text-gray-500">requires timestamps</span>
               </div>
               <div className="rounded-xl border border-gray-800 bg-gray-900/50 p-3.5">
                 <span className="text-gray-400 block">Mean Time to Respond (MTTR)</span>
                 <span className="text-xl font-bold text-purple-400 mt-1 block">{mttr}</span>
-                <span className="text-[10px] text-gray-500">Automated SOAR</span>
+                <span className="text-[10px] text-gray-500">requires triage times</span>
               </div>
               <div className="rounded-xl border border-gray-800 bg-gray-900/50 p-3.5">
-                <span className="text-gray-400 block">Containment Success Rate</span>
-                <span className="text-xl font-bold text-emerald-400 mt-1 block">99.4%</span>
-                <span className="text-[10px] text-emerald-400">Zero Data Loss</span>
+                <span className="text-gray-400 block">Open / Resolved</span>
+                <span className="text-xl font-bold text-emerald-400 mt-1 block">{safeAlerts.length - resolvedCount} / {resolvedCount}</span>
+                <span className="text-[10px] text-gray-500">live alert status</span>
               </div>
             </div>
 
             <div className="rounded-xl border border-gray-800 bg-gray-900/30 p-4">
               <h3 className="font-mono text-sm font-bold text-gray-200 uppercase mb-2">Executive Summary</h3>
               <p className="text-xs text-gray-300 leading-relaxed">
-                During the current reporting window, the SOC intercepted and neutralized several active intrusion attempts, including an adversary attempting Cobalt Strike command &amp; control tunneling over DNS and an unauthorized LSASS memory credential harvesting attempt. Both endpoints were quarantined via automated EDR policies within 4.2 minutes of first indicator detection. No customer PII or critical financial ledgers were exfiltrated.
+                {safeAlerts.length === 0
+                  ? 'No alerts have been recorded in the current window. This report summarizes live platform data only.'
+                  : `During the current reporting window the SOC processed ${safeAlerts.length} alert(s): ${criticalCount} critical, ${highCount} high, and ${safeAlerts.length - criticalCount - highCount} medium/low. ${resolvedCount} are resolved. Full details are in the Technical ledger.`}
               </p>
             </div>
           </div>
@@ -241,7 +245,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ alerts }) => {
 
         <div className="mt-8 border-t border-gray-800 pt-4 flex items-center justify-between text-xs font-mono text-gray-500">
           <span>AegisSOC Platform Suite v1.0 &bull; Security Operations Report</span>
-          <span>Verified by Cryptographic Hash: SHA-256 (6a9f4c...)</span>
+          <span>Generated from live platform data</span>
         </div>
       </div>
     </div>
