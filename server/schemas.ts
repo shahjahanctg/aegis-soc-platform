@@ -1,0 +1,144 @@
+import { z } from 'zod';
+
+// ---------------------------------------------------------------------------
+// Auth
+// ---------------------------------------------------------------------------
+
+export const LoginSchema = z.object({
+  username: z.string().min(1).max(64),
+  password: z.string().min(1).max(256),
+});
+
+export const RefreshSchema = z.object({
+  refreshToken: z.string().min(10).max(4096),
+});
+
+// ---------------------------------------------------------------------------
+// Alerts
+// ---------------------------------------------------------------------------
+
+export const AlertSeverityEnum = z.enum(['low', 'medium', 'high', 'critical']);
+export const AlertStatusEnum = z.enum(['new', 'triaged', 'investigating', 'resolved']);
+
+const IpOrText = z.string().min(1).max(255);
+
+export const TriageSchema = z.object({
+  status: AlertStatusEnum.optional(),
+  triage_notes: z.string().max(4000).optional(),
+  analyst: z.string().min(1).max(120).optional(),
+});
+
+export const CreateAlertSchema = z.object({
+  severity: AlertSeverityEnum.default('medium'),
+  title: z.string().min(1).max(300),
+  description: z.string().min(1).max(4000),
+  source: z.string().min(1).max(200),
+  mitreTechnique: z.string().max(200).optional(),
+  mitreTactic: z.string().max(120).optional(),
+  sourceIp: IpOrText.optional(),
+  destIp: IpOrText.optional(),
+  asset: z.string().max(200).optional(),
+});
+
+// Telemetry ingest accepts either a single event, an array, or { events: [...] }
+export const IngestEventSchema = z.object({
+  isAlert: z.boolean().optional(),
+  severity: AlertSeverityEnum.optional(),
+  title: z.string().max(300).optional(),
+  name: z.string().max(300).optional(),
+  message: z.string().max(4000).optional(),
+  description: z.string().max(4000).optional(),
+  details: z.string().max(4000).optional(),
+  source: z.string().max(200).optional(),
+  sensor: z.string().max(200).optional(),
+  mitreTechnique: z.string().max(200).optional(),
+  mitreTactic: z.string().max(120).optional(),
+  sourceIp: z.string().max(255).optional(),
+  destIp: z.string().max(255).optional(),
+  asset: z.string().max(200).optional(),
+  host: z.string().max(200).optional(),
+  artifact: z.string().max(100).optional(),
+}).passthrough();
+
+export const IngestSchema = z.union([
+  IngestEventSchema,
+  z.array(IngestEventSchema).min(1).max(500),
+  z.object({ events: z.array(IngestEventSchema).min(1).max(500) }),
+]);
+
+export const SimulationSchema = z.object({
+  scenario: z.enum(['ransomware', 'beacon', 'sqli']),
+});
+
+// ---------------------------------------------------------------------------
+// Threat intel
+// ---------------------------------------------------------------------------
+
+export const IOCTypeEnum = z.enum(['ip', 'domain', 'sha256', 'url']);
+
+export const IOCAddSchema = z.object({
+  type: IOCTypeEnum,
+  value: z.string().min(1).max(512),
+  threatGroup: z.string().max(200).optional(),
+  description: z.string().max(1000).optional(),
+  category: z.string().max(120).optional(),
+});
+
+// ---------------------------------------------------------------------------
+// Training
+// ---------------------------------------------------------------------------
+
+export const LessonCompleteSchema = z.object({}).passthrough();
+
+export const CampaignLaunchSchema = z.object({
+  name: z.string().min(1).max(200).optional(),
+  template: z.string().max(200).optional(),
+  targetCount: z.number().int().min(1).max(100000).optional(),
+});
+
+// ---------------------------------------------------------------------------
+// CTF
+// ---------------------------------------------------------------------------
+
+export const FlagSubmitSchema = z.object({
+  flag: z.string().min(1).max(256),
+});
+
+export const HintUnlockSchema = z.object({}).passthrough();
+
+// ---------------------------------------------------------------------------
+// DFIR
+// ---------------------------------------------------------------------------
+
+export const DFIRAddSchema = z.object({
+  timestamp: z.string().max(64).optional(),
+  artifact: z.string().max(100).optional(),
+  system: z.string().max(200).optional(),
+  source: z.string().max(200).optional(),
+  action: z.string().max(300).optional(),
+  details: z.string().max(4000).optional(),
+  isMalicious: z.boolean().optional(),
+});
+
+// ---------------------------------------------------------------------------
+// AI
+// ---------------------------------------------------------------------------
+
+export const AIChatSchema = z.object({
+  message: z.string().min(1).max(8000),
+  contextAlertId: z.string().max(64).optional(),
+  context: z.unknown().optional(),
+});
+
+export const AITriageSchema = z.object({
+  alertId: z.string().min(1).max(64),
+});
+
+export const AINlToRulesSchema = z.object({
+  prompt: z.string().min(1).max(4000),
+  ruleFormat: z.enum(['sigma', 'yara', 'suricata']).default('sigma'),
+});
+
+export const AIPhishingSchema = z.object({
+  rawEmail: z.string().min(1).max(30000),
+});

@@ -1,0 +1,7 @@
+{
+  "name": "SOC & Training Platform Suite",
+  "description": "Unified Security Operations Center (SOC) dashboard, training LMS, CTF arena, and AI-augmented cybersecurity analysis platform.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+
