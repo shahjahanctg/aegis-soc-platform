@@ -96,6 +96,7 @@ AegisSOC integrates directly into standard enterprise network architectures with
 ### Prerequisites
 - **Operating System**: Linux (Ubuntu 20.04+, Debian 11+, RHEL 8+, or CentOS Stream), macOS, or Windows Server.
 - **Runtime**: Node.js **18.x** or higher and `npm`.
+- **Docker + Docker Compose** (for the full production stack: PostgreSQL, Redis, nginx).
 
 ### 1. Clone & Install Dependencies
 ```bash
@@ -114,12 +115,16 @@ cp .env.example .env
 ```
 Edit `.env` to configure authentication and optional AI features:
 ```env
-# Port is locked to 3000
+# Port (3000 in development; nginx exposes 80 in the Docker stack)
 PORT=3000
 
 # REQUIRED IN PRODUCTION — JWT signing secrets (openssl rand -base64 48)
 JWT_ACCESS_SECRET=
 JWT_REFRESH_SECRET=
+
+# Persistence (leave unset to run with the zero-dependency in-memory store)
+DATABASE_URL=postgres://aegis:aegis_dev_password@localhost:5432/aegis
+REDIS_URL=redis://localhost:6379
 
 # Optional: Enables Gemini 3.8 Flash autonomous triage & AI Copilot features
 GEMINI_API_KEY=your_gemini_api_key_here
@@ -127,6 +132,8 @@ GEMINI_API_KEY=your_gemini_api_key_here
 # Optional: static API key for machine log forwarders calling /api/telemetry/ingest
 INGEST_API_KEY=
 ```
+
+> **Persistence:** with `DATABASE_URL` set, the server provisions its schema and seed data automatically on first boot (users, alerts, IOCs, courses, CTF challenges, DFIR timeline, audit log — all stored in PostgreSQL). Without it, the app falls back to an in-memory store for local development (data resets on restart). `REDIS_URL` enables cross-replica SSE fan-out and shared rate limiting; both degrade gracefully when unreachable.
 
 ### Authentication & RBAC
 All API endpoints require a JWT (15-minute access token, 7-day refresh token, scrypt-hashed passwords). Four roles are enforced server-side:
@@ -144,6 +151,10 @@ Seeded passwords default to `ChangeMe_<Role>_2026!` (e.g. `ChangeMe_Admin_2026!`
 
 **CTF integrity:** flags are never sent to the browser — submissions are validated server-side only.
 
+**Per-user progress (Phase 2):** lesson completions, CTF solves, hint unlocks, and scores are tracked per user in PostgreSQL (`user_progress`, `user_solves`, `user_hints`, `users.score`). Two analysts see independent course progress and challenge states; CTF points are awarded once per user (hint penalties included) and the leaderboard ranks real platform users alongside seeded bot teams. Scores/solves are returned in login and `/api/auth/me` responses.
+
+**Zero-training-data AI (Phase 3):** no ML training anywhere. Gemini output (triage verdicts, phishing analysis, CTF hints) is schema-validated with zod before it is trusted or persisted — invalid output falls back to deterministic engines. New `/api/ai/anomaly` runs rolling z-score anomaly detection on live telemetry; `/api/ai/correlate` clusters related alerts by MITRE technique + source IP within a time window; `/api/ai/ctf-hint` generates LLM nudges from public challenge metadata only (flags never enter prompts or responses). The email analyzer parses real SPF/DKIM/DMARC headers when no API key is configured.
+
 ### 3. Run Development Server
 ```bash
 npm run dev
@@ -155,9 +166,42 @@ The application will be accessible at: `http://localhost:3000` (or `http://<YOUR
 # Compiles Vite frontend into dist/ and bundles backend into dist/server.cjs
 npm run build
 
-# Start production server
+# Start production server (requires JWT_ACCESS_SECRET / JWT_REFRESH_SECRET in prod)
 npm start
 ```
+
+### 5. Docker Deployment (Recommended)
+The Docker stack runs the whole platform — app, PostgreSQL, Redis, and an nginx reverse proxy (SSE-buffering disabled for live streams):
+
+```bash
+# One command: builds the image, starts Postgres + Redis + app + nginx
+docker compose up -d --build
+
+# The platform is now at http://localhost (nginx on port 80)
+
+# Logs / status
+make logs        # or: docker compose logs -f --tail=100
+make ps          # or: docker compose ps
+
+# Stop (keeps database volume)
+docker compose down
+
+# Stop AND wipe the database (fresh start)
+make clean       # or: docker compose down -v
+```
+
+Environment for the stack is read from your shell (or a `.env` file in the repo root):
+
+| Variable | Default in compose | Notes |
+| :--- | :--- | :--- |
+| `POSTGRES_PASSWORD` | `aegis_dev_password` | Set a strong value before first `up` |
+| `JWT_ACCESS_SECRET` / `JWT_REFRESH_SECRET` | dev placeholders | **Set real values** (`openssl rand -base64 48`) |
+| `INGEST_API_KEY` | — | API key for log forwarders |
+| `GEMINI_API_KEY` | — | Enables AI copilot features |
+| `SEED_*_PASSWORD` | `ChangeMe_<Role>_2026!` | Override seeded demo passwords |
+| `HTTP_PORT` | `80` | Host port for nginx |
+
+> **First boot** creates the schema and seeds demo data automatically. The container waits for PostgreSQL to be healthy, then the app connects, seeds, and serves. CTF flags remain server-side only; audit events are persisted to `audit_log` and streamed live.
 
 ---
 

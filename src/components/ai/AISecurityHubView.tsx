@@ -10,10 +10,12 @@ import {
   Copy, 
   Check, 
   FileCode,
-  ArrowRight
+  ArrowRight,
+  Activity,
+  Radar
 } from 'lucide-react';
 import { api } from '../../services/api';
-import { UserSession } from '../../types';
+import { UserSession, AnomalyResult, CorrelationResult, MetricBaseline } from '../../types';
 
 interface AISecurityHubViewProps {
   user: UserSession;
@@ -27,7 +29,7 @@ interface ChatMessage {
 }
 
 export const AISecurityHubView: React.FC<AISecurityHubViewProps> = ({ user }) => {
-  const [activeSubTab, setActiveSubTab] = useState<'copilot' | 'phishing' | 'playbook'>('copilot');
+  const [activeSubTab, setActiveSubTab] = useState<'copilot' | 'phishing' | 'playbook' | 'anomaly'>('copilot');
 
   // Copilot State
   const [messages, setMessages] = useState<ChatMessage[]>([
@@ -53,6 +55,11 @@ export const AISecurityHubView: React.FC<AISecurityHubViewProps> = ({ user }) =>
   const [playbookResult, setPlaybookResult] = useState<string | null>(null);
   const [playbookLoading, setPlaybookLoading] = useState(false);
   const [copied, setCopied] = useState(false);
+
+  // Anomaly & Correlation State
+  const [anomalyResult, setAnomalyResult] = useState<AnomalyResult | null>(null);
+  const [correlateResult, setCorrelateResult] = useState<CorrelationResult | null>(null);
+  const [anomalyLoading, setAnomalyLoading] = useState(false);
 
   // Send message to Gemini SOC Copilot
   const handleSendMessage = async (e: React.FormEvent) => {
@@ -136,6 +143,24 @@ export const AISecurityHubView: React.FC<AISecurityHubViewProps> = ({ user }) =>
     setTimeout(() => setCopied(false), 2000);
   };
 
+  // Run statistical anomaly detection + rule-based alert correlation
+  const handleRunAnomaly = async () => {
+    if (anomalyLoading) return;
+    setAnomalyLoading(true);
+    try {
+      const [a, c] = await Promise.all([
+        api.detectAnomalies({ window: 30, sensitivity: 2 }),
+        api.correlateAlerts({ windowMinutes: 60 }),
+      ]);
+      setAnomalyResult(a);
+      setCorrelateResult(c);
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setAnomalyLoading(false);
+    }
+  };
+
   return (
     <div className="space-y-4">
       {/* Top Banner */}
@@ -176,9 +201,141 @@ export const AISecurityHubView: React.FC<AISecurityHubViewProps> = ({ user }) =>
             >
               Playbook Generator
             </button>
+            <button
+              onClick={() => setActiveSubTab('anomaly')}
+              className={`rounded-md px-3 py-1.5 transition-all cursor-pointer ${
+                activeSubTab === 'anomaly' ? 'bg-purple-950 text-purple-300 border border-purple-700 font-bold' : 'text-gray-400 hover:text-gray-200'
+              }`}
+            >
+              Anomaly &amp; Correlation
+            </button>
           </div>
         </div>
       </div>
+
+      {/* Subtab 4: Anomaly Detection & Alert Correlation */}
+      {activeSubTab === 'anomaly' && (
+        <div className="space-y-4">
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-gray-800 bg-gray-950 p-4">
+            <div>
+              <h3 className="font-mono text-sm font-bold text-gray-100 uppercase flex items-center gap-2">
+                <Activity className="h-4 w-4 text-emerald-400" />
+                Statistical Anomaly Detection &amp; Alert Correlation
+              </h3>
+              <p className="text-xs text-gray-400">
+                Zero-training-data engine: rolling z-scores on live telemetry plus rule-based clustering of related alerts (MITRE technique + source IP).
+              </p>
+            </div>
+            <button
+              onClick={handleRunAnomaly}
+              disabled={anomalyLoading}
+              className="flex items-center gap-2 rounded-xl bg-emerald-700 hover:bg-emerald-600 disabled:opacity-50 px-5 py-2.5 text-xs font-mono font-bold text-white transition-all cursor-pointer shadow-[0_0_15px_rgba(16,185,129,0.25)]"
+            >
+              <Radar className="h-4 w-4" />
+              {anomalyLoading ? 'Analyzing Telemetry...' : 'Run Anomaly & Correlation Scan'}
+            </button>
+          </div>
+
+          {anomalyResult && correlateResult && (
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+              {/* Anomaly Detection Panel */}
+              <div className="rounded-2xl border border-gray-800 bg-gray-950 p-5 shadow-lg space-y-3">
+                <div className="flex items-center justify-between">
+                  <h4 className="font-mono text-xs font-bold text-gray-200 uppercase flex items-center gap-2">
+                    <Activity className="h-4 w-4 text-emerald-400" /> Telemetry Baseline &amp; Anomalies
+                  </h4>
+                  <span className={`px-2 py-0.5 rounded text-[10px] uppercase font-bold border ${
+                    anomalyResult.riskLevel === 'critical' ? 'bg-rose-950 text-rose-300 border-rose-800' :
+                    anomalyResult.riskLevel === 'high' ? 'bg-orange-950 text-orange-300 border-orange-800' :
+                    anomalyResult.riskLevel === 'medium' ? 'bg-amber-950 text-amber-300 border-amber-800' :
+                    'bg-emerald-950 text-emerald-300 border-emerald-800'
+                  }`}>
+                    Risk: {anomalyResult.riskLevel}
+                  </span>
+                </div>
+                <p className="text-xs text-gray-400 font-mono">{anomalyResult.summary}</p>
+
+                <div className="grid grid-cols-2 gap-2">
+                  {Object.entries(anomalyResult.baseline).map(([metric, raw]) => {
+                    const b = raw as MetricBaseline;
+                    return (
+                    <div key={metric} className="rounded-lg border border-gray-800 bg-gray-900/60 p-2.5">
+                      <span className="text-[10px] text-gray-500 block uppercase">{metric}</span>
+                      <span className="text-xs text-gray-200 font-mono">
+                        mean {b.mean} · σ {b.std}
+                      </span>
+                      <span className={`block text-[10px] font-mono ${Math.abs(b.current - b.mean) > 2 * (b.std || 1) ? 'text-rose-400' : 'text-emerald-400'}`}>
+                        current {b.current}
+                      </span>
+                    </div>
+                    );
+                  })}
+                </div>
+
+                <div className="rounded-xl border border-gray-800 bg-gray-900/50 p-3 max-h-56 overflow-y-auto">
+                  <span className="text-gray-400 block mb-2 uppercase text-[10px]">Flagged Anomalies</span>
+                  {anomalyResult.anomalies.length === 0 ? (
+                    <p className="text-xs text-emerald-400 font-mono">No statistically significant deviations in the current window.</p>
+                  ) : (
+                    <ul className="space-y-1.5">
+                      {anomalyResult.anomalies.slice(0, 12).map((a, i) => (
+                        <li key={i} className="flex items-center justify-between text-[11px] font-mono text-gray-300">
+                          <span>{a.metric} <span className="text-gray-500">({a.timestamp})</span></span>
+                          <span className={`font-bold ${
+                            a.severity === 'critical' ? 'text-rose-400' : a.severity === 'high' ? 'text-orange-400' : 'text-amber-400'
+                          }`}>
+                            {a.value} (z={a.zScore})
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              </div>
+
+              {/* Correlation Panel */}
+              <div className="rounded-2xl border border-gray-800 bg-gray-950 p-5 shadow-lg space-y-3">
+                <h4 className="font-mono text-xs font-bold text-gray-200 uppercase flex items-center gap-2">
+                  <Radar className="h-4 w-4 text-cyan-400" /> Correlated Alert Clusters
+                </h4>
+                <p className="text-xs text-gray-400 font-mono">{correlateResult.summary}</p>
+
+                {correlateResult.clusters.length === 0 ? (
+                  <p className="text-xs text-emerald-400 font-mono">No alert clusters meet the correlation threshold (≥2 events, span ≤ {correlateResult.windowMinutes} min).</p>
+                ) : (
+                  <div className="space-y-2.5 max-h-64 overflow-y-auto pr-1">
+                    {correlateResult.clusters.slice(0, 10).map((c) => (
+                      <div key={c.key} className="rounded-xl border border-gray-800 bg-gray-900/60 p-3">
+                        <div className="flex items-center justify-between">
+                          <span className="font-mono text-xs font-bold text-cyan-300">{c.technique}</span>
+                          <div className="flex items-center gap-2">
+                            <span className={`px-2 py-0.5 rounded text-[10px] uppercase font-bold border ${
+                              c.severity === 'critical' ? 'bg-rose-950 text-rose-300 border-rose-800' :
+                              c.severity === 'high' ? 'bg-orange-950 text-orange-300 border-orange-800' :
+                              'bg-amber-950 text-amber-300 border-amber-800'
+                            }`}>{c.severity}</span>
+                            <span className="text-[10px] font-mono text-gray-400">{c.count} alerts</span>
+                          </div>
+                        </div>
+                        <p className="text-[11px] font-mono text-gray-400 mt-1">
+                          source {c.sourceIp} · {c.timeSpanMinutes} min span · {c.assets.length} asset(s)
+                        </p>
+                        <p className="text-[11px] text-gray-300 mt-1.5 leading-relaxed">{c.investigation}</p>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {!anomalyResult && !anomalyLoading && (
+            <div className="rounded-2xl border border-dashed border-gray-800 bg-gray-950/50 p-10 text-center text-gray-500 font-mono text-xs">
+              Run a scan to baseline live telemetry (EPS, throughput, CPU, threats blocked) and surface correlated incident clusters from recent alerts.
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Subtab 1: SOC Copilot Chat */}
       {activeSubTab === 'copilot' && (

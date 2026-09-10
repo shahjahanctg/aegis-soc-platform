@@ -142,3 +142,37 @@ export const AINlToRulesSchema = z.object({
 export const AIPhishingSchema = z.object({
   rawEmail: z.string().min(1).max(30000),
 });
+
+// ---------------------------------------------------------------------------
+// AI — structured LLM outputs (validated before trust / persistence)
+// ---------------------------------------------------------------------------
+
+export const AITriageVerdictSchema = z.object({
+  classification: z.enum(['TRUE_POSITIVE', 'FALSE_POSITIVE', 'SUSPICIOUS']),
+  confidence: z.number().min(0).max(100),
+  reasoning: z.string().min(1).max(3000),
+  recommendedAction: z.string().min(1).max(3000),
+});
+
+export const AIPhishingAnalysisSchema = z.object({
+  riskScore: z.number().min(0).max(100),
+  verdict: z.string().min(1).max(120),
+  spfCheck: z.string().min(1).max(40),
+  dkimCheck: z.string().min(1).max(40),
+  dmarcCheck: z.string().min(1).max(40),
+  indicators: z.array(z.string().min(1).max(300)).max(40),
+  recommendedAction: z.string().min(1).max(3000),
+});
+
+export const AIAnomalySchema = z.object({
+  window: z.number().int().min(5).max(500).optional(),
+  sensitivity: z.number().min(1).max(4).optional(),
+});
+
+export const AICorrelateSchema = z.object({
+  windowMinutes: z.number().int().min(5).max(1440).optional(),
+});
+
+export const AICtfHintSchema = z.object({
+  challengeId: z.string().min(1).max(64),
+});

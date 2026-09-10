@@ -33,3 +33,89 @@ export interface IOCItem {
   description: string;
   category: string;
 }
+
+export interface CourseLesson {
+  id: string;
+  title: string;
+  duration: string;
+  type: 'video' | 'interactive_lab' | 'quiz';
+  completed: boolean;
+  content: string;
+  quiz?: {
+    question: string;
+    options: string[];
+    correctIndex: number;
+    explanation: string;
+  };
+}
+
+export interface CourseItem {
+  id: string;
+  title: string;
+  category: 'SOC Operations' | 'DFIR' | 'Offensive / Red Team' | 'Cloud Security' | 'AI & Threat Hunting';
+  level: 'Beginner' | 'Intermediate' | 'Advanced';
+  description: string;
+  instructor: string;
+  lessons: CourseLesson[];
+}
+
+export interface PhishingCampaignItem {
+  id: string;
+  name: string;
+  template: string;
+  targetCount: number;
+  sentCount: number;
+  openedCount: number;
+  clickedCount: number;
+  compromisedCount: number;
+  status: 'active' | 'completed' | 'draft';
+  createdAt: string;
+}
+
+export interface CTFChallengeItem {
+  id: string;
+  title: string;
+  category: 'Web Exploitation' | 'Forensics' | 'Reverse Engineering' | 'Cryptography' | 'OSINT' | 'Pwn / Binary';
+  points: number;
+  difficulty: 'Easy' | 'Medium' | 'Hard' | 'Insane';
+  solved: boolean;
+  solvesCount: number;
+  description: string;
+  hint: string;
+  hintPenalty: number;
+  hintUnlocked: boolean;
+  flag: string;
+  artifactSnippet?: string;
+  author: string;
+}
+
+export interface LeaderboardEntry {
+  rank: number;
+  team: string;
+  username?: string;      // display name for real platform users (matches session name)
+  score: number;
+  solves: number;
+  solvedCount?: number;   // alias the frontend renders
+  lastSolved?: string;    // short date of most recent solve
+  avatar: string;
+  country: string;
+}
+
+export interface DFIRTimelineEvent {
+  id: string;
+  timestamp: string;
+  artifact: 'MFT' | 'Prefetch' | 'EventLog' | 'Registry' | 'Network' | 'Memory' | string;
+  system: string;
+  source: string;
+  action: string;
+  details: string;
+  isMalicious: boolean;
+}
+
+export interface TelemetryPoint {
+  timestamp: string;
+  eps: number;
+  networkMbps: number;
+  cpuUsage: number;
+  threatsBlocked: number;
+}

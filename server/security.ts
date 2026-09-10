@@ -52,8 +52,9 @@ export const ROLE_PERMISSIONS: Record<Role, string[]> = {
 };
 
 // ---------------------------------------------------------------------------
-// Users (seeded; scrypt password hashes). Replace with a user table when the
-// Postgres persistence layer lands.
+// User storage is provided by the persistence layer (server/store.ts):
+// Postgres-backed when DATABASE_URL is set, in-memory seeded otherwise.
+// server.ts injects the lookup via setUserLookup() during startup.
 // ---------------------------------------------------------------------------
 
 export interface SafeUser {
@@ -62,45 +63,25 @@ export interface SafeUser {
   name: string;
   role: Role;
   badge?: string;
+  score?: number;
 }
 
-interface UserRecord extends SafeUser {
-  passwordHash: string;
-  passwordSalt: string;
+export interface UserLookup {
+  verifyPassword(username: string, password: string): Promise<SafeUser | null>;
+  findUserById(id: string): Promise<SafeUser | null>;
 }
 
-function scryptHash(password: string, salt: string): string {
-  return crypto.scryptSync(password, salt, 64).toString('hex');
+let userLookup: UserLookup | null = null;
+
+export function setUserLookup(lookup: UserLookup): void {
+  userLookup = lookup;
 }
 
-function makeUser(u: { username: string; name: string; password: string; role: Role; badge?: string }): UserRecord {
-  const passwordSalt = crypto.randomBytes(16).toString('hex');
-  return { id: `usr-${crypto.randomUUID().slice(0, 8)}`, ...u, passwordSalt, passwordHash: scryptHash(u.password, passwordSalt) };
-}
-
-const users: UserRecord[] = [
-  makeUser({ username: 'admin', name: 'Platform Administrator', password: process.env.SEED_ADMIN_PASSWORD || 'ChangeMe_Admin_2026!', role: 'admin', badge: 'Commander' }),
-  makeUser({ username: 'analyst', name: 'Lead SOC Analyst', password: process.env.SEED_ANALYST_PASSWORD || 'ChangeMe_Analyst_2026!', role: 'analyst', badge: 'Lead Defender' }),
-  makeUser({ username: 'trainer', name: 'Training Coordinator', password: process.env.SEED_TRAINER_PASSWORD || 'ChangeMe_Trainer_2026!', role: 'trainer', badge: 'Instructor' }),
-  makeUser({ username: 'viewer', name: 'Read-Only Auditor', password: process.env.SEED_VIEWER_PASSWORD || 'ChangeMe_Viewer_2026!', role: 'viewer', badge: 'Observer' }),
-];
-
-export function verifyPassword(username: string, password: string): SafeUser | null {
-  const user = users.find(u => u.username === username.toLowerCase());
-  if (!user) return null;
-  const candidate = scryptHash(password, user.passwordSalt);
-  const ok = candidate.length === user.passwordHash.length &&
-    crypto.timingSafeEqual(Buffer.from(candidate, 'hex'), Buffer.from(user.passwordHash, 'hex'));
-  return ok ? toSafeUser(user) : null;
-}
-
-export function findUserById(id: string): SafeUser | null {
-  const user = users.find(u => u.id === id);
-  return user ? toSafeUser(user) : null;
-}
-
-function toSafeUser(u: UserRecord): SafeUser {
-  return { id: u.id, username: u.username, name: u.name, role: u.role, badge: u.badge };
+function getLookup(): UserLookup {
+  if (!userLookup) {
+    throw new Error('UserLookup not configured — server startup did not create a store');
+  }
+  return userLookup;
 }
 
 // ---------------------------------------------------------------------------
@@ -141,7 +122,7 @@ export function toSessionUser(user: SafeUser) {
     role: user.role as string,
     permissions: ROLE_PERMISSIONS[user.role] ?? [],
     badge: user.badge,
-    score: 0,
+    score: user.score ?? 0,
   };
 }
 
@@ -184,7 +165,7 @@ export async function requireAuth(req: AuthedRequest, res: Response, next: NextF
   if (!payload || payload.typ !== 'access' || typeof payload.sub !== 'string') {
     return res.status(401).json({ error: 'Invalid or expired token', code: 'BAD_TOKEN' });
   }
-  const user = findUserById(payload.sub);
+  const user = await getLookup().findUserById(payload.sub);
   if (!user) {
     return res.status(401).json({ error: 'User no longer exists', code: 'UNKNOWN_USER' });
   }
@@ -203,7 +184,8 @@ export async function sseAuth(req: AuthedRequest, res: Response, next: NextFunct
   }
   const payload = await verifyToken(token, ACCESS_SECRET);
   if (payload?.typ === 'access' && typeof payload.sub === 'string') {
-    req.user = findUserById(payload.sub) || undefined;
+    const user = await getLookup().findUserById(payload.sub);
+    req.user = user || undefined;
   }
   next();
 }
@@ -246,19 +228,35 @@ export function requireIngestAuth(req: AuthedRequest, res: Response, next: NextF
 }
 
 // ---------------------------------------------------------------------------
-// Rate limiters
+// Rate limiters. In-memory by default; server.ts injects Redis-backed stores
+// (rate-limit-redis) when REDIS_URL is reachable so limits survive restarts
+// and hold across multiple app replicas.
 // ---------------------------------------------------------------------------
 
-const standard = (windowMs: number, max: number) =>
+import type { Store as RateLimitStore } from 'express-rate-limit';
+
+export interface RateLimitStores {
+  auth?: RateLimitStore;
+  ai?: RateLimitStore;
+  ingest?: RateLimitStore;
+  mutation?: RateLimitStore;
+}
+
+const standard = (windowMs: number, max: number, store?: RateLimitStore) =>
   rateLimit({
     windowMs,
     max,
+    store,
     standardHeaders: true,
     legacyHeaders: false,
     message: { error: 'Too many requests, slow down.', code: 'RATE_LIMITED' },
   });
 
-export const authLimiter = standard(15 * 60 * 1000, 20);        // login/refresh: 20 / 15 min / IP
-export const aiLimiter = standard(60 * 1000, 20);               // AI endpoints: 20 / min / IP
-export const ingestLimiter = standard(60 * 1000, 600);          // telemetry ingest: 600 / min / IP
-export const mutationLimiter = standard(60 * 1000, 120);        // general mutations: 120 / min / IP
+export function createLimiters(stores: RateLimitStores = {}) {
+  return {
+    auth: standard(15 * 60 * 1000, 20, stores.auth),        // login/refresh: 20 / 15 min / IP
+    ai: standard(60 * 1000, 20, stores.ai),                 // AI endpoints: 20 / min / IP
+    ingest: standard(60 * 1000, 600, stores.ingest),        // telemetry ingest: 600 / min / IP
+    mutation: standard(60 * 1000, 120, stores.mutation),    // general mutations: 120 / min / IP
+  };
+}

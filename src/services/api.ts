@@ -1,4 +1,4 @@
-import { Alert, IOC, Course, PhishingCampaign, CTFChallenge, CTFLeaderboardEntry, DFIRTimelineEvent, DFIRArtifact, TelemetryPoint, SensorStatus, UserSession } from '../types';
+import { Alert, IOC, Course, PhishingCampaign, CTFChallenge, CTFLeaderboardEntry, DFIRTimelineEvent, DFIRArtifact, TelemetryPoint, SensorStatus, UserSession, AnomalyResult, CorrelationResult } from '../types';
 import { useAuthStore, getAuthState } from '../stores/authStore';
 
 // ---------------------------------------------------------------------------
@@ -305,17 +305,43 @@ export const api = {
   async analyzePhishingEmail(rawEmail: string): Promise<{
     riskScore: number;
     verdict: string;
-    spfDkimStatus: string;
-    urgencyIndicators: string[];
-    maliciousUrls: string[];
-    executiveSummary: string;
-    recommendations: string[];
+    spfCheck: string;
+    dkimCheck: string;
+    dmarcCheck: string;
+    indicators: string[];
+    recommendedAction: string;
   }> {
     const res = await authedFetch('/api/ai/phishing-analyze', {
       method: 'POST',
       body: JSON.stringify({ rawEmail }),
     });
-    return jsonOrThrow(res, { riskScore: 0, verdict: 'Analysis unavailable', spfDkimStatus: '', urgencyIndicators: [], maliciousUrls: [], executiveSummary: '', recommendations: [] });
+    return jsonOrThrow(res, { riskScore: 0, verdict: 'Analysis unavailable', spfCheck: 'NONE', dkimCheck: 'NONE', dmarcCheck: 'NONE', indicators: [], recommendedAction: '' });
+  },
+
+  async detectAnomalies(opts?: { window?: number; sensitivity?: number }): Promise<AnomalyResult> {
+    const res = await authedFetch('/api/ai/anomaly', {
+      method: 'POST',
+      body: JSON.stringify(opts ?? {}),
+    });
+    return jsonOrThrow(res, {
+      window: 0, analyzedPoints: 0, sensitivity: 2, baseline: {}, anomalies: [], summary: 'Anomaly analysis unavailable', riskLevel: 'low',
+    } as AnomalyResult);
+  },
+
+  async correlateAlerts(opts?: { windowMinutes?: number }): Promise<CorrelationResult> {
+    const res = await authedFetch('/api/ai/correlate', {
+      method: 'POST',
+      body: JSON.stringify(opts ?? {}),
+    });
+    return jsonOrThrow(res, { windowMinutes: 60, analyzedAlerts: 0, clusters: [], summary: 'Correlation unavailable' } as CorrelationResult);
+  },
+
+  async getAICtfHint(challengeId: string): Promise<{ hint: string; source: string }> {
+    const res = await authedFetch('/api/ai/ctf-hint', {
+      method: 'POST',
+      body: JSON.stringify({ challengeId }),
+    });
+    return jsonOrThrow(res, { hint: '', source: 'builtin' });
   },
 
   // ---------------------------------------------------------------------------

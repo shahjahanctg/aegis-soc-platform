@@ -1,0 +1,73 @@
+# ---------------------------------------------------------------------------
+# AegisSOC — full production-like stack
+#   docker compose up -d --build
+# Frontend + API:   http://localhost:80 (nginx -> app:3000)
+# PostgreSQL:       localhost:5432 (user aegis / db aegis)
+# Redis:            localhost:6379
+# ---------------------------------------------------------------------------
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: aegis
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-aegis_dev_password}
+      POSTGRES_DB: aegis
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aegis -d aegis"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    restart: unless-stopped
+
+  app:
+    build: .
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DATABASE_URL: postgres://aegis:${POSTGRES_PASSWORD:-aegis_dev_password}@postgres:5432/aegis
+      REDIS_URL: redis://redis:6379
+      # Production: generate with `openssl rand -base64 48` and export both vars.
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:-dev-compose-access-secret-change-me}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:-dev-compose-refresh-secret-change-me}
+      INGEST_API_KEY: ${INGEST_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD:-ChangeMe_Admin_2026!}
+      SEED_ANALYST_PASSWORD: ${SEED_ANALYST_PASSWORD:-ChangeMe_Analyst_2026!}
+      SEED_TRAINER_PASSWORD: ${SEED_TRAINER_PASSWORD:-ChangeMe_Trainer_2026!}
+      SEED_VIEWER_PASSWORD: ${SEED_VIEWER_PASSWORD:-ChangeMe_Viewer_2026!}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    expose:
+      - "3000"
+    restart: unless-stopped
+
+  nginx:
+    image: nginx:1.27-alpine
+    ports:
+      - "${HTTP_PORT:-80}:80"
+    volumes:
+      - ./docker/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - app
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  redisdata:

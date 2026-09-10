@@ -27,9 +27,36 @@ const auditLog: AuditEntry[] = [];
 type AuditBroadcaster = (entry: AuditEntry) => void;
 let broadcaster: AuditBroadcaster | null = null;
 
+/**
+ * Persistence sink. Default keeps a bounded in-memory buffer; the Postgres
+ * store replaces it at startup. recordAudit stays synchronous (fire-and-forget
+ * persist) so route handlers are not blocked on the audit write.
+ */
+type AuditSink = (entry: AuditEntry) => void | Promise<void>;
+let sink: AuditSink = (entry) => {
+  auditLog.push(entry);
+  if (auditLog.length > MAX_AUDIT_ENTRIES) {
+    auditLog.splice(0, auditLog.length - MAX_AUDIT_ENTRIES);
+  }
+};
+
+/** Async source for GET /api/audit (Postgres-backed when configured). */
+type AuditSource = (limit: number) => Promise<AuditEntry[]>;
+let source: AuditSource = async (limit) => {
+  return auditLog.slice(-Math.min(limit, MAX_AUDIT_ENTRIES)).reverse();
+};
+
 /** Server wires its SSE fan-out here so audit events stream to live clients. */
 export function setAuditBroadcaster(fn: AuditBroadcaster) {
   broadcaster = fn;
+}
+
+export function setAuditSink(fn: AuditSink) {
+  sink = fn;
+}
+
+export function setAuditSource(fn: AuditSource) {
+  source = fn;
 }
 
 export function recordAudit(
@@ -53,14 +80,14 @@ export function recordAudit(
     detail: detail?.slice(0, 500),
   };
 
-  auditLog.push(entry);
-  if (auditLog.length > MAX_AUDIT_ENTRIES) {
-    auditLog.splice(0, auditLog.length - MAX_AUDIT_ENTRIES);
-  }
+  // fire-and-forget persist (bounded buffer fallback keeps working)
+  void Promise.resolve(sink(entry)).catch((err) => {
+    console.warn('[audit] persist failed:', err?.message || err);
+  });
   broadcaster?.(entry);
   return entry;
 }
 
-export function getAuditLog(limit = 200): AuditEntry[] {
-  return auditLog.slice(-Math.min(limit, MAX_AUDIT_ENTRIES)).reverse();
+export async function getAuditLog(limit = 200): Promise<AuditEntry[]> {
+  return source(limit);
 }

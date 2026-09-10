@@ -1,20 +1,23 @@
+import 'dotenv/config';
 import express from 'express';
 import path from 'path';
 import crypto from 'crypto';
-import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI } from '@google/genai';
 import helmet from 'helmet';
-import { z } from 'zod';
 import {
   issueAccessToken, issueRefreshToken, verifyRefreshToken, requireAuth,
-  requirePermission, requireIngestAuth, sseAuth, authLimiter, aiLimiter,
-  ingestLimiter, mutationLimiter, toSessionUser, ROLE_PERMISSIONS, verifyPassword,
-  findUserById, JWT_ACCESS_TTL_SEC, type Role, type AuthedRequest,
+  requirePermission, requireIngestAuth, sseAuth, createLimiters, setUserLookup,
+  toSessionUser, JWT_ACCESS_TTL_SEC, type Role, type AuthedRequest,
 } from './server/security';
-import { LoginSchema, RefreshSchema, TriageSchema, CreateAlertSchema, IngestSchema, SimulationSchema, IOCAddSchema, CampaignLaunchSchema, FlagSubmitSchema, HintUnlockSchema, DFIRAddSchema, AIChatSchema, AITriageSchema, AINlToRulesSchema, AIPhishingSchema } from './server/schemas';
-import { recordAudit, setAuditBroadcaster, getAuditLog } from './server/audit';
-import { makeAlertId, addAlertBounded } from './server/alertsStore';
-import type { AlertItem, IOCItem } from './server/types';
+import { LoginSchema, RefreshSchema, TriageSchema, CreateAlertSchema, IngestSchema, SimulationSchema, IOCAddSchema, CampaignLaunchSchema, FlagSubmitSchema, HintUnlockSchema, DFIRAddSchema, AIChatSchema, AITriageSchema, AINlToRulesSchema, AIPhishingSchema, AITriageVerdictSchema, AIPhishingAnalysisSchema, AIAnomalySchema, AICorrelateSchema, AICtfHintSchema } from './server/schemas';
+import { extractJson, detectTelemetryAnomalies, correlateAlerts } from './server/ai';
+import { recordAudit, setAuditBroadcaster, setAuditSink, setAuditSource, getAuditLog } from './server/audit';
+import { makeAlertId } from './server/alertsStore';
+import { createStore, type Store } from './server/store';
+import { createSSERelay, createRateLimitStores, type SSERelay } from './server/redis';
+import type {
+  AlertItem, IOCItem, CourseItem, PhishingCampaignItem, CTFChallengeItem, DFIRTimelineEvent,
+} from './server/types';
 
 // Initialize Gemini Client server-side safely
 const getGeminiClient = () => {
@@ -30,513 +33,15 @@ const getGeminiClient = () => {
   });
 };
 
-// Initial Seed Data for SOC, Training, CTF, DFIR, and AI
-// (AlertItem / IOCItem interfaces live in server/types.ts)
+// ---------------------------------------------------------------------------
+// Real-time fan-out. Local SSE clients are always served; when Redis is
+// configured the relay fans events out to other app replicas (pub/sub).
+// ---------------------------------------------------------------------------
 
-const alerts: AlertItem[] = [
-  {
-    id: 'ALT-1092',
-    severity: 'critical',
-    status: 'new',
-    title: 'Cobalt Strike C2 Beaconing Detected via DNS Tunneling',
-    description: 'Repeated high-entropy TXT record requests to suspicious domain c2-update-service.xyz from DC-PROD-01',
-    source: 'Suricata NIDS / Core DNS Sensor',
-    mitreTechnique: 'T1071.004 - DNS Application Layer Protocol',
-    mitreTactic: 'Command and Control',
-    sourceIp: '10.0.4.12',
-    destIp: '185.220.101.5',
-    asset: 'DC-PROD-01 (Active Directory Domain Controller)',
-    created_at: new Date(Date.now() - 1000 * 60 * 12).toISOString(),
-    updated_at: new Date(Date.now() - 1000 * 60 * 12).toISOString(),
-  },
-  {
-    id: 'ALT-1091',
-    severity: 'high',
-    status: 'investigating',
-    title: 'LSASS Memory Dumping via MiniDumpWriteDump API',
-    description: 'Unusual process procdump.exe invoked by svchost.exe targeting lsass.exe process memory space',
-    source: 'Sysmon Event ID 10',
-    mitreTechnique: 'T1003.001 - OS Credential Dumping: LSASS Memory',
-    mitreTactic: 'Credential Access',
-    sourceIp: '10.0.5.45',
-    destIp: '10.0.5.45',
-    asset: 'WS-FINANCE-09 (Finance Workstation)',
-    created_at: new Date(Date.now() - 1000 * 60 * 35).toISOString(),
-    updated_at: new Date(Date.now() - 1000 * 60 * 5).toISOString(),
-    analyst: 'Sarah Chen (Lead SOC Analyst)',
-    triage_notes: 'Confirmed unauthorized process execution. Host isolated via EDR agent.',
-  },
-  {
-    id: 'ALT-1090',
-    severity: 'high',
-    status: 'triaged',
-    title: 'Multiple Failed Kerberos Pre-Authentication (AS-REP Roasting)',
-    description: 'Over 45 failed AS-REQ attempts without pre-authentication for service accounts (krbtgt, svc_sql, svc_backup)',
-    source: 'Windows Security Event ID 4768',
-    mitreTechnique: 'T1558.004 - Steal or Forge Kerberos Tickets: AS-REP Roasting',
-    mitreTactic: 'Credential Access',
-    sourceIp: '10.0.8.21',
-    destIp: '10.0.4.12',
-    asset: 'DC-PROD-01',
-    created_at: new Date(Date.now() - 1000 * 60 * 58).toISOString(),
-    updated_at: new Date(Date.now() - 1000 * 60 * 15).toISOString(),
-    analyst: 'Marcus Vance',
-  },
-  {
-    id: 'ALT-1089',
-    severity: 'medium',
-    status: 'new',
-    title: 'Potential SQL Injection in Web Payment Gateway',
-    description: 'WAF blocked UNION SELECT pattern in parameter `invoice_id` on endpoint /api/v1/checkout',
-    source: 'ModSecurity WAF / Cloud Ingress',
-    mitreTechnique: 'T1190 - Exploit Public-Facing Application',
-    mitreTactic: 'Initial Access',
-    sourceIp: '194.26.29.114',
-    destIp: '172.16.10.80',
-    asset: 'WEB-PORTAL-01',
-    created_at: new Date(Date.now() - 1000 * 60 * 95).toISOString(),
-    updated_at: new Date(Date.now() - 1000 * 60 * 95).toISOString(),
-  },
-  {
-    id: 'ALT-1088',
-    severity: 'low',
-    status: 'resolved',
-    title: 'Outbound Port Scan to External Subnet',
-    description: 'Host probed 120 destinations on TCP port 445 (SMB) within 30 seconds',
-    source: 'Palo Alto Perimeter FW',
-    mitreTechnique: 'T1046 - Network Service Discovery',
-    mitreTactic: 'Discovery',
-    sourceIp: '10.0.3.88',
-    destIp: 'Various External',
-    asset: 'DEV-CONTAINER-03',
-    created_at: new Date(Date.now() - 1000 * 60 * 180).toISOString(),
-    updated_at: new Date(Date.now() - 1000 * 60 * 30).toISOString(),
-    analyst: 'Elena Rostova',
-    triage_notes: 'False positive caused by misconfigured Docker vulnerability scanner script. Scanner reconfigured.',
-  }
-];
-
-const iocs: IOCItem[] = [
-  {
-    id: 'IOC-01',
-    type: 'ip',
-    value: '185.220.101.5',
-    threatGroup: 'APT29 / Cozy Bear',
-    confidence: 96,
-    blocked: true,
-    firstSeen: '2026-03-01',
-    description: 'Active Cobalt Strike C2 redirection server hosted on bulletproof VPS',
-    category: 'Command & Control',
-  },
-  {
-    id: 'IOC-02',
-    type: 'domain',
-    value: 'c2-update-service.xyz',
-    threatGroup: 'UNC2452',
-    confidence: 92,
-    blocked: true,
-    firstSeen: '2026-03-04',
-    description: 'Fast-flux DNS tunnel domain used for staging PowerShell payloads',
-    category: 'Malware Distribution',
-  },
-  {
-    id: 'IOC-03',
-    type: 'sha256',
-    value: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
-    threatGroup: 'LockBit 3.0 Affiliate',
-    confidence: 99,
-    blocked: true,
-    firstSeen: '2026-02-28',
-    description: 'Ransomware loader compiled with anti-sandbox VM evasion techniques',
-    category: 'Ransomware',
-  },
-  {
-    id: 'IOC-04',
-    type: 'ip',
-    value: '194.26.29.114',
-    threatGroup: 'FIN7 / Carbanak',
-    confidence: 84,
-    blocked: false,
-    firstSeen: '2026-03-08',
-    description: 'Scanning infrastructure conducting automated SQLi & DirBuster sweeps',
-    category: 'Reconnaissance',
-  },
-  {
-    id: 'IOC-05',
-    type: 'domain',
-    value: 'auth-verify-portal-office365.online',
-    threatGroup: 'Storm-0837',
-    confidence: 98,
-    blocked: true,
-    firstSeen: '2026-03-07',
-    description: 'Adversary-in-the-Middle (AiTM) Microsoft 365 token harvesting reverse proxy',
-    category: 'Credential Phishing',
-  }
-];
-
-interface CourseLesson {
-  id: string;
-  title: string;
-  duration: string;
-  type: 'video' | 'interactive_lab' | 'quiz';
-  completed: boolean;
-  content: string;
-  quiz?: {
-    question: string;
-    options: string[];
-    correctIndex: number;
-    explanation: string;
-  };
-}
-
-interface CourseItem {
-  id: string;
-  title: string;
-  category: 'SOC Operations' | 'DFIR' | 'Offensive / Red Team' | 'Cloud Security' | 'AI & Threat Hunting';
-  level: 'Beginner' | 'Intermediate' | 'Advanced';
-  description: string;
-  instructor: string;
-  lessons: CourseLesson[];
-}
-
-const courses: CourseItem[] = [
-  {
-    id: 'CRS-01',
-    title: 'SOC Tier 1: Incident Triage & MITRE ATT&CK Mapping',
-    category: 'SOC Operations',
-    level: 'Beginner',
-    description: 'Master fast-paced alert triage, distinguishing false positives from true positives, and mapping indicators to the MITRE ATT&CK enterprise matrix.',
-    instructor: 'Alex Mercer, CISSP',
-    lessons: [
-      {
-        id: 'CRS-01-L1',
-        title: 'Anatomy of a Modern SIEM Alert Pipeline',
-        duration: '15 min',
-        type: 'interactive_lab',
-        completed: true,
-        content: 'Understanding Syslog, Windows Event IDs (4624, 4625, 4688), Zeek connection logs, and correlation rules.',
-        quiz: {
-          question: 'Which Windows Event ID signifies successful logon?',
-          options: ['Event ID 4625', 'Event ID 4624', 'Event ID 4688', 'Event ID 1102'],
-          correctIndex: 1,
-          explanation: 'Event ID 4624 documents successful logons, whereas 4625 records failed attempts.',
-        }
-      },
-      {
-        id: 'CRS-01-L2',
-        title: 'Triage Workflow: Investigating Suspicious PowerShell',
-        duration: '25 min',
-        type: 'interactive_lab',
-        completed: false,
-        content: 'Learn to decode Base64 encoded PowerShell commands (-EncodedCommand), trace parent-child process relationships, and extract staged payloads.',
-        quiz: {
-          question: 'What PowerShell flag indicates an execution policy bypass commonly used by adversaries?',
-          options: ['-WindowStyle Hidden', '-ExecutionPolicy Bypass', '-NoProfile', 'All of the above'],
-          correctIndex: 3,
-          explanation: 'Attackers routinely combine -ExecutionPolicy Bypass, -NoProfile, and -WindowStyle Hidden to execute unauthorized scripts invisibly.',
-        }
-      },
-      {
-        id: 'CRS-01-L3',
-        title: 'Containing Active Host Compromise',
-        duration: '20 min',
-        type: 'interactive_lab',
-        completed: false,
-        content: 'Network isolation procedures, process termination, credential revocation, and snapshot capture.',
-      }
-    ]
-  },
-  {
-    id: 'CRS-02',
-    title: 'DFIR: Windows Memory & Volatility 3 Forensics',
-    category: 'DFIR',
-    level: 'Advanced',
-    description: 'Extract actionable forensic evidence from compromised RAM dumps using Volatility 3, malfind, pslist, and netscan.',
-    instructor: 'Dr. Evelyn Vance, EnCE',
-    lessons: [
-      {
-        id: 'CRS-02-L1',
-        title: 'RAM Acquisition & Memory Dump Integrity',
-        duration: '20 min',
-        type: 'interactive_lab',
-        completed: false,
-        content: 'Comparing raw memory dumps, WinPmem acquisition, and validating SHA256 integrity hashes.',
-      },
-      {
-        id: 'CRS-02-L2',
-        title: 'Detecting Injected Code with Volatility Malfind',
-        duration: '35 min',
-        type: 'interactive_lab',
-        completed: false,
-        content: 'Identifying PAGE_EXECUTE_READWRITE permissions and unbacked VAD segments characteristic of process hollowing.',
-      }
-    ]
-  },
-  {
-    id: 'CRS-03',
-    title: 'Phishing Defense & Email Header Forensics',
-    category: 'SOC Operations',
-    level: 'Intermediate',
-    description: 'Inspect raw RFC 5322 email headers, diagnose SPF/DKIM/DMARC alignment failures, and identify Adversary-in-the-Middle token stealers.',
-    instructor: 'David Kim, Threat Intel Lead',
-    lessons: [
-      {
-        id: 'CRS-03-L1',
-        title: 'SPF, DKIM, and DMARC Verification Mechanics',
-        duration: '18 min',
-        type: 'interactive_lab',
-        completed: false,
-        content: 'Understand Return-Path vs From alignment, public DKIM cryptographic selectors, and DMARC reject policies.',
-      }
-    ]
-  }
-];
-
-interface PhishingCampaignItem {
-  id: string;
-  name: string;
-  template: string;
-  targetCount: number;
-  sentCount: number;
-  openedCount: number;
-  clickedCount: number;
-  compromisedCount: number;
-  status: 'active' | 'completed' | 'draft';
-  createdAt: string;
-}
-
-const phishingCampaigns: PhishingCampaignItem[] = [
-  {
-    id: 'PHISH-2026-01',
-    name: 'Quarterly Executive Urgent Wire Transfer',
-    template: 'CFO Urgent Financial Authorization',
-    targetCount: 150,
-    sentCount: 150,
-    openedCount: 88,
-    clickedCount: 22,
-    compromisedCount: 4,
-    status: 'completed',
-    createdAt: '2026-02-20',
-  },
-  {
-    id: 'PHISH-2026-02',
-    name: 'IT Helpdesk: Mandatory MFA Reset Simulation',
-    template: 'Microsoft Authenticator Migration Notification',
-    targetCount: 320,
-    sentCount: 320,
-    openedCount: 245,
-    clickedCount: 41,
-    compromisedCount: 7,
-    status: 'active',
-    createdAt: '2026-03-05',
-  }
-];
-
-interface CTFChallengeItem {
-  id: string;
-  title: string;
-  category: 'Web Exploitation' | 'Forensics' | 'Reverse Engineering' | 'Cryptography' | 'OSINT' | 'Pwn / Binary';
-  points: number;
-  difficulty: 'Easy' | 'Medium' | 'Hard' | 'Insane';
-  solved: boolean;
-  solvesCount: number;
-  description: string;
-  hint: string;
-  hintPenalty: number;
-  hintUnlocked: boolean;
-  flag: string;
-  artifactSnippet?: string;
-  author: string;
-}
-
-const ctfChallenges: CTFChallengeItem[] = [
-  {
-    id: 'CTF-WEB-01',
-    title: 'SQLi Through the Looking Glass',
-    category: 'Web Exploitation',
-    points: 150,
-    difficulty: 'Easy',
-    solved: false,
-    solvesCount: 68,
-    description: 'An internal employee directory API endpoint `/api/staff/search?dept=finance` suffers from improper input sanitization. Can you extract the secret administrator access token stored in the `secrets` table?',
-    hint: 'Try standard UNION SELECT payloads with 3 columns: NULL, NULL, flag FROM secrets--',
-    hintPenalty: 25,
-    hintUnlocked: false,
-    flag: 'FLAG{un10n_s3l3ct_byp4ss_2026}',
-    artifactSnippet: "GET /api/staff/search?dept=finance' UNION SELECT 1,table_name,3 FROM information_schema.tables-- HTTP/1.1",
-    author: 'ZeroDayZero',
-  },
-  {
-    id: 'CTF-FOR-02',
-    title: 'The Phantom Packet (PCAP Deep Dive)',
-    category: 'Forensics',
-    points: 250,
-    difficulty: 'Medium',
-    solved: false,
-    solvesCount: 34,
-    description: 'We intercepted a suspicious packet capture during a data exfiltration incident. The adversary hid binary chunks inside ICMP Echo Request payload fields. Reconstruct the payload to recover the flag.',
-    hint: 'Examine packet data offsets starting at byte 48 in ICMP type 8 requests.',
-    hintPenalty: 40,
-    hintUnlocked: false,
-    flag: 'FLAG{1cmp_tunn3l_3xf1ltr4t10n_m4st3r}',
-    artifactSnippet: "Packet #44: IP 10.0.4.12 > 185.220.101.5: ICMP echo request, id 0x1337, seq 1, data: 'RkxBR3sxY21wX3R1bm4zbA=='",
-    author: 'PacketWhisperer',
-  },
-  {
-    id: 'CTF-REV-03',
-    title: 'Ransomware Deobfuscation',
-    category: 'Reverse Engineering',
-    points: 350,
-    difficulty: 'Hard',
-    solved: false,
-    solvesCount: 19,
-    description: 'A malicious ELF binary checks an encrypted key before detonating. Inspect the disassembly string lookup table and reverse the XOR decryption key.',
-    hint: 'The XOR single-byte key is 0x5A applied to the ciphertext buffer at address 0x402100.',
-    hintPenalty: 60,
-    hintUnlocked: false,
-    flag: 'FLAG{x0r_k3y_r3v3rs3d_0x5a_succ3ss}',
-    artifactSnippet: "00401122: mov eax, [rbp-0x10]\n00401125: xor eax, 0x5a\n00401128: cmp eax, [rbp-0x14]\n0040112b: jne 0x401140",
-    author: 'HexMaster99',
-  },
-  {
-    id: 'CTF-CRYPTO-04',
-    title: 'Broken RSA Nonce Reuse',
-    category: 'Cryptography',
-    points: 200,
-    difficulty: 'Medium',
-    solved: false,
-    solvesCount: 42,
-    description: 'An authentication daemon reused identical private exponents across two distinct public moduli. Compute the greatest common divisor (GCD) to factorize the prime factors.',
-    hint: 'gcd(N1, N2) yields common prime factor p.',
-    hintPenalty: 35,
-    hintUnlocked: false,
-    flag: 'FLAG{c0mm0n_f4ct0r_f41lur3_gcd}',
-    artifactSnippet: "N1 = 0xc7f198...\nN2 = 0x8a912e...\ne = 65537",
-    author: 'CryptoNerd',
-  },
-  {
-    id: 'CTF-OSINT-05',
-    title: 'Shadow Infrastructure Attribution',
-    category: 'OSINT',
-    points: 100,
-    difficulty: 'Easy',
-    solved: false,
-    solvesCount: 91,
-    description: 'An adversary registered multiple typosquatting domains using a specific ProtonMail address and custom JARM fingerprint. Trace their GitHub repo or Gist to discover their alias.',
-    hint: 'Search certificate transparency logs (crt.sh) for SSL serial hashes associated with the email.',
-    hintPenalty: 15,
-    hintUnlocked: false,
-    flag: 'FLAG{0s1nt_tr4ck1ng_j4rm_2026}',
-    artifactSnippet: "JARM: 2ad2ad0002ad2ad00042d42d000000e3e5... Email: adversary-red@proton.me",
-    author: 'SherlockBytes',
-  },
-  {
-    id: 'CTF-PWN-06',
-    title: 'Return-to-libc Buffer Overflow',
-    category: 'Pwn / Binary',
-    points: 450,
-    difficulty: 'Insane',
-    solved: false,
-    solvesCount: 11,
-    description: 'Exploit an unconstrained `strcpy` buffer on an x86_64 service with NX enabled. Chain ROP gadgets to invoke `system("/bin/sh")`.',
-    hint: 'Locate pop rdi; ret gadget inside libc.so.6 to populate first argument register.',
-    hintPenalty: 75,
-    hintUnlocked: false,
-    flag: 'FLAG{r0p_g4dg3t_r3t2l1bc_pwn3d}',
-    artifactSnippet: "[0x0000000000023b6a] pop rdi; ret\n[0x00000000001b45bd] '/bin/sh'\n[0x0000000000052290] system()",
-    author: 'StackSmasher',
-  }
-];
-
-const ctfLeaderboard = [
-  { rank: 1, team: 'ByteVipers', score: 1450, solves: 6, avatar: '🐍', country: 'SG' },
-  { rank: 2, team: 'NullSec_Squad', score: 1200, solves: 5, avatar: '⚡', country: 'US' },
-  { rank: 3, team: 'DhakaCyberGuard', score: 950, solves: 4, avatar: '🐯', country: 'BD' },
-  { rank: 4, team: 'KernelPanicOps', score: 750, solves: 3, avatar: '💻', country: 'DE' },
-  { rank: 5, team: 'You (Current Analyst)', score: 0, solves: 0, avatar: '🛡️', country: 'LOCAL' },
-];
-
-interface DFIRTimelineEvent {
-  id: string;
-  timestamp: string;
-  artifact: 'MFT' | 'Prefetch' | 'EventLog' | 'Registry' | 'Network' | 'Memory';
-  system: string;
-  source: string;
-  action: string;
-  details: string;
-  isMalicious: boolean;
-}
-
-const dfirTimeline: DFIRTimelineEvent[] = [
-  {
-    id: 'EVT-01',
-    timestamp: '2026-03-09T08:14:22Z',
-    artifact: 'Network',
-    system: 'FIREWALL-EDGE-01',
-    source: 'Snort/Bro',
-    action: 'Inbound HTTP POST with encoded payload',
-    details: 'Suspicious URI /upload.php from IP 185.220.101.5 containing multipart form data with PHP webshell signature',
-    isMalicious: true,
-  },
-  {
-    id: 'EVT-02',
-    timestamp: '2026-03-09T08:14:45Z',
-    artifact: 'MFT',
-    system: 'WEB-PORTAL-01',
-    source: '$MFT Record 10452',
-    action: 'File Creation on disk',
-    details: 'Created C:\\inetpub\\wwwroot\\uploads\\cmd_mini.php ($STANDARD_INFORMATION timestamp matched)',
-    isMalicious: true,
-  },
-  {
-    id: 'EVT-03',
-    timestamp: '2026-03-09T08:15:10Z',
-    artifact: 'EventLog',
-    system: 'WEB-PORTAL-01',
-    source: 'Security Event ID 4688',
-    action: 'Process Creation: w3wp.exe spawned cmd.exe',
-    details: 'Command line: cmd.exe /c whoami /all && net group "Domain Admins" /domain',
-    isMalicious: true,
-  },
-  {
-    id: 'EVT-04',
-    timestamp: '2026-03-09T08:16:30Z',
-    artifact: 'Prefetch',
-    system: 'WEB-PORTAL-01',
-    source: 'PROCDUMP.EXE-A81E9B12.pf',
-    action: 'Application Execution Recorded',
-    details: 'Procdump executed 1 time with run count incremented. Target binary: lsass.exe',
-    isMalicious: true,
-  },
-  {
-    id: 'EVT-05',
-    timestamp: '2026-03-09T08:18:04Z',
-    artifact: 'Registry',
-    system: 'WEB-PORTAL-01',
-    source: 'NTUSER.DAT\\RunOnce',
-    action: 'Persistence Value Injected',
-    details: 'Key added: "SecurityHealthSys" -> "powershell.exe -w hidden -enc JABjAD0AbgBlAHc..."',
-    isMalicious: true,
-  }
-];
-
-let telemetryHistory: { timestamp: string; eps: number; networkMbps: number; cpuUsage: number; threatsBlocked: number }[] = [];
-// Seed 20 historical telemetry datapoints
-const now = Date.now();
-for (let i = 20; i >= 0; i--) {
-  telemetryHistory.push({
-    timestamp: new Date(now - i * 5000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
-    eps: Math.floor(450 + Math.random() * 320),
-    networkMbps: Math.floor(120 + Math.random() * 80),
-    cpuUsage: Math.floor(40 + Math.random() * 35),
-    threatsBlocked: Math.floor(5 + Math.random() * 8),
-  });
-}
-
-// Global SSE clients
 const sseClients = new Set<express.Response>();
+let relay: SSERelay | null = null;
 
-export function broadcastSSE(event: string, data: any) {
+function localFanOut(event: string, data: any) {
   const namedPayload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
   const defaultPayload = `data: ${JSON.stringify({ type: event === 'alert:new' ? 'NEW_ALERT' : event, alert: data, ...data })}\n\n`;
   for (const client of sseClients) {
@@ -549,40 +54,55 @@ export function broadcastSSE(event: string, data: any) {
   }
 }
 
+export function broadcastSSE(event: string, data: any) {
+  localFanOut(event, data);
+  relay?.publish(event, data);
+}
+
 // Stream audit trail entries to connected clients in real time
 setAuditBroadcaster((entry) => broadcastSSE('audit:entry', entry));
 
-// Background simulation ticker
-setInterval(() => {
-  const latestEps = Math.floor(450 + Math.random() * 350);
-  const latestNetwork = Math.floor(110 + Math.random() * 95);
-  const latestCpu = Math.floor(38 + Math.random() * 40);
-  const latestThreats = Math.floor(3 + Math.random() * 12);
-  const timeStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-
-  const newPoint = {
-    timestamp: timeStr,
-    eps: latestEps,
-    networkMbps: latestNetwork,
-    cpuUsage: latestCpu,
-    threatsBlocked: latestThreats,
-  };
-
-  telemetryHistory.push(newPoint);
-  if (telemetryHistory.length > 30) telemetryHistory.shift();
-
-  broadcastSSE('telemetry:live', newPoint);
-}, 5000);
+// ---------------------------------------------------------------------------
+// Server bootstrap
+// ---------------------------------------------------------------------------
 
 async function startServer() {
+  // Persistence: Postgres when DATABASE_URL is set, in-memory otherwise.
+  const store: Store = await createStore();
+  setUserLookup(store);
+  setAuditSink((entry) => {
+    void store.recordAudit(entry).catch((err) => console.warn('[audit] persist failed:', err?.message || err));
+  });
+  setAuditSource((limit) => store.getAuditLog(limit));
+
+  // Optional Redis: cross-replica SSE + shared rate limiting (graceful fallback).
+  const redisUrl = process.env.REDIS_URL;
+  if (redisUrl) {
+    relay = createSSERelay(redisUrl, (event, data) => localFanOut(event, data));
+    console.log('[redis] SSE relay connected');
+  }
+  const rateLimitStores = redisUrl ? await createRateLimitStores(redisUrl) : undefined;
+  const limiters = createLimiters(rateLimitStores);
+
   const app = express();
-  const PORT = 3000;
+  const PORT = Number(process.env.PORT) || 3000;
+
+  // Behind the nginx reverse proxy: trust the first hop so req.ip and the rate
+  // limiters key on the real client address (nginx overwrites X-Forwarded-For).
+  app.set('trust proxy', 1);
 
   app.use(helmet({
     contentSecurityPolicy: process.env.NODE_ENV === 'production' ? undefined : false,
     crossOriginEmbedderPolicy: false,
   }));
   app.use(express.json({ limit: '256kb' }));
+
+  // Async-handler wrapper: rejects are forwarded to the error middleware.
+  type Handler = (req: AuthedRequest, res: express.Response) => Promise<unknown> | unknown;
+  const ah = (fn: Handler) =>
+    (req: express.Request, res: express.Response, next: express.NextFunction) => {
+      Promise.resolve(fn(req as AuthedRequest, res)).catch(next);
+    };
 
   // -------------------------------------------------------------
   // SSE Real-time stream endpoint
@@ -609,24 +129,29 @@ async function startServer() {
   // -------------------------------------------------------------
   // Health & Current Session
   // -------------------------------------------------------------
-  app.get('/api/health', (req, res) => {
+  app.get('/api/health', ah(async (_req, res) => {
+    let dbOk = false;
+    try { dbOk = await store.health(); } catch { /* health() never throws */ }
     res.json({
       status: 'ok',
       timestamp: new Date().toISOString(),
       platform: 'SOC & Training Platform Suite v1.0',
+      storage: store.kind,
+      databaseConnected: dbOk,
+      redisConfigured: !!redisUrl,
       geminiConfigured: !!process.env.GEMINI_API_KEY,
     });
-  });
+  }));
 
   // -------------------------------------------------------------
   // Auth: login / refresh / me / logout
   // -------------------------------------------------------------
-  app.post('/api/auth/login', authLimiter, async (req, res) => {
+  app.post('/api/auth/login', limiters.auth, ah(async (req, res) => {
     const parsed = LoginSchema.safeParse(req.body);
     if (!parsed.success) {
       return res.status(400).json({ error: 'Username and password are required', code: 'INVALID_INPUT' });
     }
-    const user = verifyPassword(parsed.data.username, parsed.data.password);
+    const user = await store.verifyPassword(parsed.data.username, parsed.data.password);
     if (!user) {
       recordAudit(req, 'auth.login', `user:${parsed.data.username}`, 'denied', 'Invalid credentials');
       return res.status(401).json({ error: 'Invalid username or password', code: 'BAD_CREDENTIALS' });
@@ -641,9 +166,9 @@ async function startServer() {
       expiresIn: JWT_ACCESS_TTL_SEC,
       user: toSessionUser(user),
     });
-  });
+  }));
 
-  app.post('/api/auth/refresh', authLimiter, async (req, res) => {
+  app.post('/api/auth/refresh', limiters.auth, ah(async (req, res) => {
     const parsed = RefreshSchema.safeParse(req.body);
     if (!parsed.success) {
       return res.status(400).json({ error: 'Refresh token required', code: 'INVALID_INPUT' });
@@ -652,13 +177,13 @@ async function startServer() {
     if (!payload || typeof payload.sub !== 'string') {
       return res.status(401).json({ error: 'Invalid or expired refresh token', code: 'BAD_REFRESH_TOKEN' });
     }
-    const user = findUserById(payload.sub);
+    const user = await store.findUserById(payload.sub);
     if (!user) {
       return res.status(401).json({ error: 'User no longer exists', code: 'UNKNOWN_USER' });
     }
     const accessToken = await issueAccessToken(user);
     res.json({ accessToken, expiresIn: JWT_ACCESS_TTL_SEC, user: toSessionUser(user) });
-  });
+  }));
 
   app.get('/api/auth/me', requireAuth, (req: AuthedRequest, res) => {
     res.json({ user: toSessionUser(req.user!) });
@@ -669,79 +194,56 @@ async function startServer() {
     res.json({ success: true });
   });
 
-  app.get('/api/audit', requireAuth, requirePermission('admin'), (req, res) => {
-    res.json({ entries: getAuditLog(Number(req.query.limit) || 200) });
-  });
+  app.get('/api/audit', requireAuth, requirePermission('admin'), ah(async (req, res) => {
+    res.json({ entries: await getAuditLog(Number(req.query.limit) || 200) });
+  }));
 
   // -------------------------------------------------------------
   // Alerts Endpoints
   // -------------------------------------------------------------
-  app.get('/api/alerts', requireAuth, requirePermission('alerts:read'), (req: AuthedRequest, res) => {
+  app.get('/api/alerts', requireAuth, requirePermission('alerts:read'), ah(async (req, res) => {
     const { severity, status, search } = req.query;
-    let filtered = [...alerts];
-
-    if (severity && severity !== 'all') {
-      filtered = filtered.filter(a => a.severity === severity);
-    }
-    if (status && status !== 'all') {
-      filtered = filtered.filter(a => a.status === status);
-    }
-    if (search && typeof search === 'string') {
-      const q = search.toLowerCase();
-      filtered = filtered.filter(a =>
-        a.title.toLowerCase().includes(q) ||
-        a.description.toLowerCase().includes(q) ||
-        a.sourceIp.includes(q) ||
-        a.destIp.includes(q) ||
-        a.mitreTechnique.toLowerCase().includes(q)
-      );
-    }
-
-    res.json({
-      alerts: filtered,
-      total: filtered.length,
-      stats: {
-        critical: alerts.filter(a => a.severity === 'critical').length,
-        high: alerts.filter(a => a.severity === 'high').length,
-        medium: alerts.filter(a => a.severity === 'medium').length,
-        low: alerts.filter(a => a.severity === 'low').length,
-        new: alerts.filter(a => a.status === 'new').length,
-        investigating: alerts.filter(a => a.status === 'investigating').length,
-        resolved: alerts.filter(a => a.status === 'resolved').length,
-      }
+    const result = await store.listAlerts({
+      severity: typeof severity === 'string' ? severity : undefined,
+      status: typeof status === 'string' ? status : undefined,
+      search: typeof search === 'string' ? search : undefined,
     });
-  });
+    res.json({
+      alerts: result.alerts,
+      total: result.total,
+      stats: result.stats,
+    });
+  }));
 
-  app.get('/api/alerts/:id', requireAuth, requirePermission('alerts:read'), (req: AuthedRequest, res) => {
-    const alert = alerts.find(a => a.id === req.params.id);
+  app.get('/api/alerts/:id', requireAuth, requirePermission('alerts:read'), ah(async (req, res) => {
+    const alert = await store.getAlert(req.params.id);
     if (!alert) {
       return res.status(404).json({ error: 'Alert not found' });
     }
     res.json(alert);
-  });
+  }));
 
-  app.patch('/api/alerts/:id/triage', requireAuth, requirePermission('alerts:triage'), mutationLimiter, (req: AuthedRequest, res) => {
+  app.patch('/api/alerts/:id/triage', requireAuth, requirePermission('alerts:triage'), limiters.mutation, ah(async (req, res) => {
     const parsed = TriageSchema.safeParse(req.body);
     if (!parsed.success) {
       return res.status(400).json({ error: 'Invalid triage payload', code: 'INVALID_INPUT' });
     }
-    const alert = alerts.find(a => a.id === req.params.id);
-    if (!alert) {
+    const { status, triage_notes, analyst } = parsed.data;
+    const updated = await store.updateAlert(req.params.id, {
+      ...(status ? { status } : {}),
+      ...(triage_notes !== undefined ? { triage_notes } : {}),
+      ...(analyst ? { analyst } : {}),
+    });
+    if (!updated) {
       return res.status(404).json({ error: 'Alert not found' });
     }
 
-    const { status, triage_notes, analyst } = parsed.data;
-    if (status) alert.status = status;
-    if (triage_notes !== undefined) alert.triage_notes = triage_notes;
-    if (analyst) alert.analyst = analyst;
-    alert.updated_at = new Date().toISOString();
+    recordAudit(req, 'alerts.triage', `alert:${updated.id}`, 'allowed', `status=${updated.status}`);
+    broadcastSSE('alert:updated', updated);
+    res.json(updated);
+  }));
 
-    recordAudit(req, 'alerts.triage', `alert:${alert.id}`, 'allowed', `status=${alert.status}`);
-    broadcastSSE('alert:updated', alert);
-    res.json(alert);
-  });
-
-  app.post('/api/alerts/create', requireAuth, requirePermission('alerts:create'), mutationLimiter, (req: AuthedRequest, res) => {
+  app.post('/api/alerts/create', requireAuth, requirePermission('alerts:create'), limiters.mutation, ah(async (req, res) => {
     const parsed = CreateAlertSchema.safeParse(req.body);
     if (!parsed.success) {
       return res.status(400).json({ error: 'Invalid alert payload', code: 'INVALID_INPUT', details: parsed.error.flatten().fieldErrors });
@@ -763,24 +265,25 @@ async function startServer() {
       updated_at: new Date().toISOString(),
     };
 
-    addAlertBounded(alerts, newAlert);
+    await store.createAlert(newAlert);
     recordAudit(req, 'alerts.create', `alert:${newAlert.id}`, 'allowed', newAlert.title);
     broadcastSSE('alert:new', newAlert);
     res.json(newAlert);
-  });
+  }));
 
   // -------------------------------------------------------------
   // Threat Intel & IOCs
   // -------------------------------------------------------------
-  app.get('/api/threat-intel/iocs', requireAuth, requirePermission('intel:read'), (req: AuthedRequest, res) => {
+  app.get('/api/threat-intel/iocs', requireAuth, requirePermission('intel:read'), ah(async (req, res) => {
+    const iocs = await store.listIocs();
     res.json({
       iocs,
       totalCount: iocs.length,
       blockedCount: iocs.filter(i => i.blocked).length,
     });
-  });
+  }));
 
-  app.post('/api/threat-intel/iocs/add', requireAuth, requirePermission('intel:write'), mutationLimiter, (req: AuthedRequest, res) => {
+  app.post('/api/threat-intel/iocs/add', requireAuth, requirePermission('intel:write'), limiters.mutation, ah(async (req, res) => {
     const parsed = IOCAddSchema.safeParse(req.body);
     if (!parsed.success) {
       return res.status(400).json({ error: 'Invalid IOC payload', code: 'INVALID_INPUT', details: parsed.error.flatten().fieldErrors });
@@ -799,29 +302,28 @@ async function startServer() {
       category: category || 'Investigation Artifact',
     };
 
-    iocs.unshift(newIoc);
-    if (iocs.length > 500) iocs.length = 500; // bound memory
+    await store.addIoc(newIoc);
     recordAudit(req, 'intel.add', `ioc:${newIoc.id}`, 'allowed', `${type}:${value.slice(0, 80)}`);
     res.json(newIoc);
-  });
+  }));
 
-  app.patch('/api/threat-intel/iocs/:id/toggle-block', requireAuth, requirePermission('intel:write'), mutationLimiter, (req: AuthedRequest, res) => {
-    const ioc = iocs.find(i => i.id === req.params.id);
+  app.patch('/api/threat-intel/iocs/:id/toggle-block', requireAuth, requirePermission('intel:write'), limiters.mutation, ah(async (req, res) => {
+    const ioc = await store.toggleIocBlock(req.params.id);
     if (!ioc) {
       return res.status(404).json({ error: 'IOC not found' });
     }
-    ioc.blocked = !ioc.blocked;
     recordAudit(req, 'intel.toggleBlock', `ioc:${ioc.id}`, 'allowed', `blocked=${ioc.blocked}`);
     res.json(ioc);
-  });
+  }));
 
   // -------------------------------------------------------------
   // Telemetry API
   // -------------------------------------------------------------
-  app.get('/api/telemetry', requireAuth, requirePermission('telemetry:read'), (req: AuthedRequest, res) => {
+  app.get('/api/telemetry', requireAuth, requirePermission('telemetry:read'), ah(async (req, res) => {
+    const { history, current } = await store.getTelemetry();
     res.json({
-      history: telemetryHistory,
-      current: telemetryHistory[telemetryHistory.length - 1],
+      history,
+      current,
       sensors: [
         { name: 'DC-PROD-01 (Sysmon)', status: 'online', eps: 142, uptime: '99.98%' },
         { name: 'SURICATA-NIDS-CORE', status: 'online', eps: 320, uptime: '100%' },
@@ -830,12 +332,11 @@ async function startServer() {
         { name: 'ENDPOINT-CROWDSTRIKE', status: 'warning', eps: 12, uptime: '98.5%' },
       ]
     });
-  });
+  }));
 
   // Telemetry & Event Ingestion endpoint for forwarders / log shippers
-  app.post('/api/telemetry/ingest', requireIngestAuth, ingestLimiter, (req: AuthedRequest, res) => {
-    const payload = req.body;
-    const parsed = IngestSchema.safeParse(payload);
+  app.post('/api/telemetry/ingest', requireIngestAuth, limiters.ingest, ah(async (req, res) => {
+    const parsed = IngestSchema.safeParse(req.body);
     if (!parsed.success) {
       return res.status(400).json({ error: 'Invalid ingest payload', code: 'INVALID_INPUT', details: parsed.error.flatten().fieldErrors });
     }
@@ -862,11 +363,11 @@ async function startServer() {
           updated_at: new Date().toISOString(),
         };
 
-        addAlertBounded(alerts, generatedAlert);
+        await store.createAlert(generatedAlert);
         broadcastSSE('alert:new', generatedAlert);
 
         // Also record to DFIR timeline for immediate digital forensics
-        dfirTimeline.push({
+        await store.addDfirEvent({
           id: `EVT-${crypto.randomUUID().slice(0, 12)}`,
           timestamp: new Date().toISOString(),
           artifact: evt.artifact || 'Syslog/EDR Event',
@@ -885,33 +386,30 @@ async function startServer() {
       alertGenerated: !!generatedAlert,
       alertId: generatedAlert?.id,
     });
-  });
-
+  }));
 
   // -------------------------------------------------------------
   // Training & LMS API
   // -------------------------------------------------------------
-  app.get('/api/training/courses', requireAuth, requirePermission('training:read'), (req: AuthedRequest, res) => {
-    res.json(courses);
-  });
+  app.get('/api/training/courses', requireAuth, requirePermission('training:read'), ah(async (req, res) => {
+    res.json(await store.listCoursesForUser(req.user!.id));
+  }));
 
-  app.post('/api/training/courses/:courseId/lessons/:lessonId/complete', requireAuth, requirePermission('training:write'), mutationLimiter, (req: AuthedRequest, res) => {
+  app.post('/api/training/courses/:courseId/lessons/:lessonId/complete', requireAuth, requirePermission('training:write'), limiters.mutation, ah(async (req, res) => {
     const { courseId, lessonId } = req.params;
-    const course = courses.find(c => c.id === courseId);
-    if (!course) return res.status(404).json({ error: 'Course not found' });
+    const result = await store.completeLesson(req.user!.id, courseId, lessonId);
+    if (!result) {
+      return res.status(404).json({ error: 'Course or lesson not found' });
+    }
+    recordAudit(req, 'training.complete', `course:${courseId}`, 'allowed', `lesson:${lessonId}`);
+    res.json({ success: true, lesson: result.lesson, courseProgress: result.courseProgress });
+  }));
 
-    const lesson = course.lessons.find(l => l.id === lessonId);
-    if (!lesson) return res.status(404).json({ error: 'Lesson not found' });
+  app.get('/api/training/phishing/campaigns', requireAuth, requirePermission('training:read'), ah(async (req, res) => {
+    res.json(await store.listCampaigns());
+  }));
 
-    lesson.completed = true;
-    res.json({ success: true, lesson, courseProgress: Math.round((course.lessons.filter(l => l.completed).length / course.lessons.length) * 100) });
-  });
-
-  app.get('/api/training/phishing/campaigns', requireAuth, requirePermission('training:read'), (req: AuthedRequest, res) => {
-    res.json(phishingCampaigns);
-  });
-
-  app.post('/api/training/phishing/launch', requireAuth, requirePermission('training:write'), mutationLimiter, (req: AuthedRequest, res) => {
+  app.post('/api/training/phishing/launch', requireAuth, requirePermission('training:write'), limiters.mutation, ah(async (req, res) => {
     const parsed = CampaignLaunchSchema.safeParse(req.body);
     if (!parsed.success) {
       return res.status(400).json({ error: 'Invalid campaign payload', code: 'INVALID_INPUT', details: parsed.error.flatten().fieldErrors });
@@ -931,9 +429,9 @@ async function startServer() {
       createdAt: new Date().toISOString().split('T')[0],
     };
 
-    phishingCampaigns.unshift(newCampaign);
+    await store.addCampaign(newCampaign);
     res.json(newCampaign);
-  });
+  }));
 
   // -------------------------------------------------------------
   // CTF Sub-Platform API
@@ -944,84 +442,63 @@ async function startServer() {
     return publicPart;
   };
 
-  app.get('/api/ctf/challenges', requireAuth, requirePermission('ctf:read'), (req: AuthedRequest, res) => {
-    res.json(ctfChallenges.map(publicChallenge));
-  });
+  app.get('/api/ctf/challenges', requireAuth, requirePermission('ctf:read'), ah(async (req, res) => {
+    const challenges = await store.listChallengesForUser(req.user!.id);
+    res.json(challenges.map(publicChallenge));
+  }));
 
-  app.post('/api/ctf/challenges/:id/unlock-hint', requireAuth, requirePermission('ctf:hints'), mutationLimiter, (req: AuthedRequest, res) => {
-    const ch = ctfChallenges.find(c => c.id === req.params.id);
-    if (!ch) return res.status(404).json({ error: 'Challenge not found' });
-
-    if (!ch.hintUnlocked) {
-      ch.hintUnlocked = true;
-      recordAudit(req, 'ctf.hint', `challenge:${ch.id}`, 'allowed', `-${ch.hintPenalty} pts`);
+  app.post('/api/ctf/challenges/:id/unlock-hint', requireAuth, requirePermission('ctf:hints'), limiters.mutation, ah(async (req, res) => {
+    const result = await store.unlockHint(req.user!.id, req.params.id);
+    if (!result) return res.status(404).json({ error: 'Challenge not found' });
+    if (!result.alreadyUnlocked) {
+      recordAudit(req, 'ctf.hint', `challenge:${req.params.id}`, 'allowed', `-${result.penalty} pts`);
     }
-    res.json({ hint: ch.hint, penalty: ch.hintPenalty });
-  });
+    res.json({ hint: result.hint, penalty: result.penalty });
+  }));
 
-  app.post('/api/ctf/challenges/:id/submit', requireAuth, requirePermission('ctf:submit'), mutationLimiter, (req: AuthedRequest, res) => {
+  app.post('/api/ctf/challenges/:id/submit', requireAuth, requirePermission('ctf:submit'), limiters.mutation, ah(async (req, res) => {
     const parsed = FlagSubmitSchema.safeParse(req.body);
     if (!parsed.success) {
       return res.status(400).json({ success: false, message: 'Flag is required' });
     }
-    const ch = ctfChallenges.find(c => c.id === req.params.id);
-    if (!ch) return res.status(404).json({ error: 'Challenge not found' });
+    const result = await store.submitFlag(req.user!.id, req.params.id, parsed.data.flag);
+    if (!result) return res.status(404).json({ error: 'Challenge not found' });
 
-    const trimmedInput = parsed.data.flag.trim();
-    if (trimmedInput === ch.flag) {
-      const netPoints = ch.hintUnlocked ? Math.max(10, ch.points - ch.hintPenalty) : ch.points;
-
-      if (!ch.solved) {
-        ch.solved = true;
-        ch.solvesCount += 1;
-
-        // Update player score in leaderboard
-        const player = ctfLeaderboard.find(l => l.country === 'LOCAL');
-        if (player) {
-          player.score += netPoints;
-          player.solves = (player.solves || 0) + 1;
-        }
-
-        // Re-sort leaderboard
-        ctfLeaderboard.sort((a, b) => b.score - a.score);
-        ctfLeaderboard.forEach((item, idx) => { item.rank = idx + 1; });
-
-        recordAudit(req, 'ctf.solve', `challenge:${ch.id}`, 'allowed', `+${netPoints} pts`);
-        broadcastSSE('ctf:score', {
-          team: req.user!.name,
-          challenge: ch.title,
-          points: netPoints,
-          leaderboard: ctfLeaderboard
-        });
-      }
-
-      return res.json({
-        success: true,
-        message: `Flag Correct! +${netPoints} Points Awarded.`,
-        pointsAwarded: netPoints,
-        challenge: publicChallenge(ch),
+    if (result.success && !result.alreadySolved) {
+      recordAudit(req, 'ctf.solve', `challenge:${result.challengeId}`, 'allowed', `+${result.pointsAwarded} pts`);
+      const leaderboard = await store.getLeaderboard();
+      broadcastSSE('ctf:score', {
+        team: req.user!.name,
+        challenge: result.challengeTitle,
+        points: result.pointsAwarded,
+        leaderboard,
       });
+    } else if (result.success) {
+      recordAudit(req, 'ctf.solve', `challenge:${result.challengeId}`, 'allowed', 'duplicate submission');
     } else {
-      recordAudit(req, 'ctf.submit', `challenge:${ch.id}`, 'denied', 'Incorrect flag');
-      return res.status(400).json({
-        success: false,
-        message: 'Incorrect flag. Check formatting (FLAG{...}) and verify extraction.',
-      });
+      recordAudit(req, 'ctf.submit', `challenge:${result.challengeId}`, 'denied', 'Incorrect flag');
     }
-  });
 
-  app.get('/api/ctf/leaderboard', requireAuth, requirePermission('ctf:read'), (req: AuthedRequest, res) => {
-    res.json(ctfLeaderboard);
-  });
+    res.json({
+      success: result.success,
+      message: result.message,
+      pointsAwarded: result.pointsAwarded,
+      newScore: result.newScore,
+    });
+  }));
+
+  app.get('/api/ctf/leaderboard', requireAuth, requirePermission('ctf:read'), ah(async (req, res) => {
+    res.json(await store.getLeaderboard());
+  }));
 
   // -------------------------------------------------------------
   // DFIR & Forensics API
   // -------------------------------------------------------------
-  app.get('/api/dfir/timeline', requireAuth, requirePermission('dfir:read'), (req: AuthedRequest, res) => {
-    res.json(dfirTimeline);
-  });
+  app.get('/api/dfir/timeline', requireAuth, requirePermission('dfir:read'), ah(async (req, res) => {
+    res.json(await store.listDfirEvents());
+  }));
 
-  app.post('/api/dfir/timeline/add', requireAuth, requirePermission('dfir:write'), mutationLimiter, (req: AuthedRequest, res) => {
+  app.post('/api/dfir/timeline/add', requireAuth, requirePermission('dfir:write'), limiters.mutation, ah(async (req, res) => {
     const parsed = DFIRAddSchema.safeParse(req.body);
     if (!parsed.success) {
       return res.status(400).json({ error: 'Invalid DFIR event payload', code: 'INVALID_INPUT', details: parsed.error.flatten().fieldErrors });
@@ -1037,22 +514,22 @@ async function startServer() {
       details: details || 'Artifact note',
       isMalicious: !!isMalicious,
     };
-    dfirTimeline.push(newEvt);
+    await store.addDfirEvent(newEvt);
     recordAudit(req, 'dfir.add', `event:${newEvt.id}`, 'allowed', newEvt.action);
     res.json(newEvt);
-  });
+  }));
 
   // -------------------------------------------------------------
   // AI Module: Gemini Powered endpoints (Chat, Triage, NL->Rules, Phishing)
   // -------------------------------------------------------------
-  app.post('/api/ai/chat', requireAuth, requirePermission('ai:chat'), aiLimiter, async (req: AuthedRequest, res) => {
+  app.post('/api/ai/chat', requireAuth, requirePermission('ai:chat'), limiters.ai, ah(async (req, res) => {
     const parsed = AIChatSchema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: 'Message is required', code: 'INVALID_INPUT' });
     const { message, contextAlertId } = parsed.data;
 
     let contextText = '';
     if (contextAlertId) {
-      const alert = alerts.find(a => a.id === contextAlertId);
+      const alert = await store.getAlert(contextAlertId);
       if (alert) {
         contextText = `\nContext Alert: ID=${alert.id}, Title="${alert.title}", Severity=${alert.severity}, SourceIP=${alert.sourceIp}, DestIP=${alert.destIp}, MITRE=${alert.mitreTechnique}.\n`;
       }
@@ -1077,47 +554,23 @@ async function startServer() {
     const msg = message.toLowerCase();
     let reply = '';
     if (msg.includes('dns') || msg.includes('tunnel') || msg.includes('cobalt')) {
-      reply = `**Cobalt Strike DNS Tunneling Analysis:**
-- **Technique:** MITRE ATT&CK T1071.004 (DNS Application Layer Protocol).
-- **Behavior:** Look for high-volume TXT/A queries with Shannon entropy > 4.2 directed to external nameservers.
-- **Immediate Containment:**
-  1. Blackhole destination domain \`c2-update-service.xyz\` on local DNS resolvers.
-  2. Isolate host \`10.0.4.12\` at the switch/EDR layer.
-  3. Dump active socket connections via \`netstat -ano\` or \`Get-NetTCPConnection\`.
-  4. Perform volatile memory dump using WinPmem before rebooting.`;
+      reply = `**Cobalt Strike DNS Tunneling Analysis:**\n- **Technique:** MITRE ATT&CK T1071.004 (DNS Application Layer Protocol).\n- **Behavior:** Look for high-volume TXT/A queries with Shannon entropy > 4.2 directed to external nameservers.\n- **Immediate Containment:**\n  1. Blackhole destination domain \`c2-update-service.xyz\` on local DNS resolvers.\n  2. Isolate host \`10.0.4.12\` at the switch/EDR layer.\n  3. Dump active socket connections via \`netstat -ano\` or \`Get-NetTCPConnection\`.\n  4. Perform volatile memory dump using WinPmem before rebooting.`;
     } else if (msg.includes('lsass') || msg.includes('mimikatz') || msg.includes('dump')) {
-      reply = `**LSASS Memory Dumping Triage (MITRE T1003.001):**
-- **Trigger:** Process memory access to \`lsass.exe\` with rights \`PROCESS_VM_READ\` (0x0010) or \`PROCESS_QUERY_INFORMATION\` (0x0400).
-- **Investigative Steps:**
-  1. Inspect Sysmon Event ID 10 for source binary and call trace.
-  2. Verify if Windows Credential Guard is enabled (\`reg query HKLM\\SYSTEM\\CurrentControlSet\\Control\\Lsa /v LsaCfgFlags\`).
-  3. Check C:\\Windows\\Temp or AppData for dumped \`.dmp\` files.
-  4. Force immediate password reset for all accounts logged into WS-FINANCE-09.`;
+      reply = `**LSASS Memory Dumping Triage (MITRE T1003.001):**\n- **Trigger:** Process memory access to \`lsass.exe\` with rights \`PROCESS_VM_READ\` (0x0010) or \`PROCESS_QUERY_INFORMATION\` (0x0400).\n- **Investigative Steps:**\n  1. Inspect Sysmon Event ID 10 for source binary and call trace.\n  2. Verify if Windows Credential Guard is enabled (\`reg query HKLM\\\\SYSTEM\\\\CurrentControlSet\\\\Control\\\\Lsa /v LsaCfgFlags\`).\n  3. Check C:\\\\Windows\\\\Temp or AppData for dumped \`.dmp\` files.\n  4. Force immediate password reset for all accounts logged into WS-FINANCE-09.`;
     } else if (msg.includes('sqli') || msg.includes('sql injection')) {
-      reply = `**SQL Injection Containment Playbook (MITRE T1190):**
-- **Vector:** Parameter manipulation on \`/api/v1/checkout\`.
-- **Validation:** Look at web server access logs for SQL keywords (\`UNION\`, \`SELECT\`, \`SLEEP()\`, \`OR 1=1\`).
-- **Remediation:**
-  1. Add strict regex WAF rule blocking \`UNION.*SELECT\` patterns.
-  2. Ensure parameterized queries (Prepared Statements / ORM) in database calls.
-  3. Validate database user privileges to prevent arbitrary \`INTO OUTFILE\` or \`xp_cmdshell\`.`;
+      reply = `**SQL Injection Containment Playbook (MITRE T1190):**\n- **Vector:** Parameter manipulation on \`/api/v1/checkout\`.\n- **Validation:** Look at web server access logs for SQL keywords (\`UNION\`, \`SELECT\`, \`SLEEP()\`, \`OR 1=1\`).\n- **Remediation:**\n  1. Add strict regex WAF rule blocking \`UNION.*SELECT\` patterns.\n  2. Ensure parameterized queries (Prepared Statements / ORM) in database calls.\n  3. Validate database user privileges to prevent arbitrary \`INTO OUTFILE\` or \`xp_cmdshell\`.`;
     } else {
-      reply = `**SOC Analyst Tactical Assessment:**
-- **Analysis:** Based on observed security telemetry, correlate source IP with recent threat intelligence feeds and review endpoint parent-child execution trees.
-- **Recommended Actions:**
-  1. Inspect Windows Event ID 4688 / Sysmon Event ID 1 for process ancestry.
-  2. Cross-reference source hashes against internal blocklists.
-  3. Open a forensic timeline ticket in the DFIR module to track lateral movement.`;
+      reply = `**SOC Analyst Tactical Assessment:**\n- **Analysis:** Based on observed security telemetry, correlate source IP with recent threat intelligence feeds and review endpoint parent-child execution trees.\n- **Recommended Actions:**\n  1. Inspect Windows Event ID 4688 / Sysmon Event ID 1 for process ancestry.\n  2. Cross-reference source hashes against internal blocklists.\n  3. Open a forensic timeline ticket in the DFIR module to track lateral movement.`;
     }
 
     res.json({ reply });
-  });
+  }));
 
   // AI Triage Verdict for a specific alert
-  app.post('/api/ai/triage', requireAuth, requirePermission('ai:chat'), aiLimiter, async (req: AuthedRequest, res) => {
+  app.post('/api/ai/triage', requireAuth, requirePermission('ai:chat'), limiters.ai, ah(async (req, res) => {
     const parsed = AITriageSchema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: 'alertId is required', code: 'INVALID_INPUT' });
-    const alert = alerts.find(a => a.id === parsed.data.alertId);
+    const alert = await store.getAlert(parsed.data.alertId);
     if (!alert) return res.status(404).json({ error: 'Alert not found' });
 
     try {
@@ -1147,9 +600,13 @@ recommendedAction: (1-2 clear immediate containment actions)`;
           }
         });
 
-        const parsed = JSON.parse(response.text || '{}');
-        alert.aiVerdict = parsed;
-        return res.json(parsed);
+        // Never trust raw LLM output — validate the schema before persisting.
+        const verdict = AITriageVerdictSchema.safeParse(extractJson(response.text || '{}'));
+        if (verdict.success) {
+          await store.updateAlert(alert.id, { aiVerdict: verdict.data });
+          return res.json(verdict.data);
+        }
+        console.warn('Gemini triage output failed schema validation:', verdict.error.issues.map((i) => i.path.join('.')).join(', '));
       }
     } catch (err: any) {
       console.warn('Gemini triage fallback:', err?.message || err);
@@ -1163,12 +620,12 @@ recommendedAction: (1-2 clear immediate containment actions)`;
       reasoning: `Analysis of ${alert.source} telemetry confirms signature heuristics matching ${alert.mitreTechnique}. Network flow between ${alert.sourceIp} and ${alert.destIp} matches known adversary TTPs.`,
       recommendedAction: `Quarantine endpoint ${alert.asset}, revoke active Kerberos TGTs, and add ${alert.destIp} to perimeter firewall drop rules.`
     };
-    alert.aiVerdict = fallbackVerdict;
+    await store.updateAlert(alert.id, { aiVerdict: fallbackVerdict });
     res.json(fallbackVerdict);
-  });
+  }));
 
   // AI Natural Language to Detection Rules (Sigma, YARA, Suricata)
-  app.post('/api/ai/nl-to-rules', requireAuth, requirePermission('ai:chat'), aiLimiter, async (req: AuthedRequest, res) => {
+  app.post('/api/ai/nl-to-rules', requireAuth, requirePermission('ai:chat'), limiters.ai, ah(async (req, res) => {
     const parsed = AINlToRulesSchema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: 'prompt is required', code: 'INVALID_INPUT' });
     const prompt = parsed.data.prompt;
@@ -1222,8 +679,8 @@ logsource:
 detection:
     selection:
         Image|endswith:
-            - '\\powershell.exe'
-            - '\\pwsh.exe'
+            - '\\\\powershell.exe'
+            - '\\\\pwsh.exe'
         CommandLine|contains:
             - '-enc'
             - '-EncodedCommand'
@@ -1238,10 +695,10 @@ tags:
     }
 
     res.json({ rule, format });
-  });
+  }));
 
   // AI Phishing Email Analyzer
-  app.post('/api/ai/phishing-analyze', requireAuth, requirePermission('ai:chat'), aiLimiter, async (req: AuthedRequest, res) => {
+  app.post('/api/ai/phishing-analyze', requireAuth, requirePermission('ai:chat'), limiters.ai, ah(async (req, res) => {
     const parsed = AIPhishingSchema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: 'Email content is required', code: 'INVALID_INPUT' });
     const rawEmail = parsed.data.rawEmail;
@@ -1257,11 +714,11 @@ Return JSON with exact structure:
 {
   "riskScore": (number between 0 and 100),
   "verdict": ("Phishing / Malicious" or "Suspicious" or "Likely Clean"),
-  "spfDkimStatus": (string, e.g. "FAIL - Domain mismatch"),
-  "urgencyIndicators": [string array of detected high-urgency/fear triggers],
-  "maliciousUrls": [string array of deceptive links],
-  "executiveSummary": (short 2-sentence summary of the threat),
-  "recommendations": [string array of 3 actions for security team]
+  "spfCheck": ("PASS" or "FAIL" or "NONE"),
+  "dkimCheck": ("PASS" or "FAIL" or "NONE"),
+  "dmarcCheck": ("PASS" or "FAIL" or "REJECT" or "QUARANTINE" or "NONE"),
+  "indicators": [string array of 2-5 suspicious indicators detected],
+  "recommendedAction": (string of 2-3 actions for the security team)
 }`;
 
         const response = await gemini.models.generateContent({
@@ -1270,42 +727,115 @@ Return JSON with exact structure:
           config: { responseMimeType: 'application/json' }
         });
 
-        return res.json(JSON.parse(response.text || '{}'));
+        const analysis = AIPhishingAnalysisSchema.safeParse(extractJson(response.text || '{}'));
+        if (analysis.success) {
+          return res.json(analysis.data);
+        }
+        console.warn('Gemini phishing output failed schema validation:', analysis.error.issues.map((i) => i.path.join('.')).join(', '));
       }
     } catch (err: any) {
       console.warn('Gemini phishing fallback:', err?.message || err);
     }
 
-    // Smart heuristic analysis
-    const hasUrgent = /urgent|immediately|suspend|within 24 hours|action required/i.test(rawEmail);
-    const hasMfa = /mfa|password|login|verify|authenticator/i.test(rawEmail);
-    const hasSuspiciousDomain = /\.online|\.xyz|\.top|\.ru|free-|login-/i.test(rawEmail);
+    // Deterministic header/body heuristic analysis (no LLM required)
+    const spfMatch = rawEmail.match(/received-spf:\s*(\w+)/i) || rawEmail.match(/spf=(\w+)/i);
+    const dkimMatch = rawEmail.match(/dkim-signature:/i) ? 'pass' : (rawEmail.match(/dkim=(\w+)/i)?.[1] ?? 'none');
+    const dmarcMatch = rawEmail.match(/dmarc=(\w+)/i);
+    const spfCheck = spfMatch && /fail|softfail/i.test(spfMatch[1]) ? 'FAIL' : spfMatch && /pass/i.test(spfMatch[1]) ? 'PASS' : 'NONE';
+    const dkimCheck = /fail/i.test(dkimMatch) ? 'FAIL' : /pass/i.test(dkimMatch) ? 'PASS' : 'NONE';
+    const dmarcCheck = dmarcMatch
+      ? /reject/i.test(dmarcMatch[1]) ? 'REJECT'
+        : /quarantine/i.test(dmarcMatch[1]) ? 'QUARANTINE'
+          : /pass/i.test(dmarcMatch[1]) ? 'PASS' : 'FAIL'
+      : 'NONE';
 
-    const score = (hasUrgent ? 35 : 0) + (hasMfa ? 30 : 0) + (hasSuspiciousDomain ? 30 : 15);
+    const hasUrgent = /urgent|immediately|suspend|within 24 hours|action required|expire/i.test(rawEmail);
+    const hasMfa = /mfa|password|login|verify|authenticator|credential/i.test(rawEmail);
+    const hasSuspiciousDomain = /\.online|\.xyz|\.top|\.ru|free-|login-|verify-|secure-|microsofft|0ffice|paypal-?secure/i.test(rawEmail);
+    const authFails = spfCheck === 'FAIL' || dmarcCheck === 'FAIL' || dmarcCheck === 'REJECT';
+
+    const indicators: string[] = [];
+    if (authFails) indicators.push(`Authentication failure (SPF=${spfCheck}, DMARC=${dmarcCheck})`);
+    if (hasUrgent) indicators.push('Artificial urgency demanding immediate action within a strict deadline');
+    if (hasMfa) indicators.push('Credential/authentication lure (password reset, MFA, login verification)');
+    if (hasSuspiciousDomain) indicators.push('Suspicious domain or brand-impersonation pattern in links/sender');
+    if (indicators.length === 0) indicators.push('No high-risk indicators matched known phishing heuristics');
+
+    const score = Math.min(98, (authFails ? 40 : 0) + (hasUrgent ? 25 : 0) + (hasMfa ? 20 : 0) + (hasSuspiciousDomain ? 15 : 5));
     res.json({
-      riskScore: Math.min(score, 98),
-      verdict: score > 60 ? 'Phishing / Malicious' : 'Suspicious',
-      spfDkimStatus: 'FAIL - Return-Path domain does not match DKIM d= signature',
-      urgencyIndicators: [
-        'Artificial urgency demanding immediate action within strict deadline',
-        'Impersonation of executive IT or Helpdesk credential authority',
-        'Coercive threat of account suspension or payroll freeze'
-      ],
-      maliciousUrls: [
-        'http://auth-verify-portal-office365.online/login/sso-saml?auth=session_sync'
-      ],
-      executiveSummary: 'Email exhibits hallmark characteristics of an Adversary-in-the-Middle credential harvesting campaign targeting corporate Microsoft 365 sessions.',
-      recommendations: [
-        'Purge message from all mailboxes via M365 Security & Compliance API',
-        'Add sending IP and envelope domain to global perimeter firewall drop list',
-        'Trigger automated phishing awareness refresher training for targeted recipients'
-      ]
+      riskScore: score,
+      verdict: score > 60 ? 'Phishing / Malicious' : score > 30 ? 'Suspicious' : 'Likely Clean',
+      spfCheck,
+      dkimCheck,
+      dmarcCheck,
+      indicators,
+      recommendedAction: score > 60
+        ? 'Purge the message from all mailboxes, block the sending domain/IP at the gateway, and notify targeted recipients to rotate credentials.'
+        : 'Flag the message for review; advise recipients to verify sender authenticity before acting.',
     });
-  });
+  }));
+
+  // Statistical anomaly detection on live telemetry (zero training data — z-score)
+  app.post('/api/ai/anomaly', requireAuth, requirePermission('ai:chat'), limiters.ai, ah(async (req, res) => {
+    const parsed = AIAnomalySchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({ error: 'Invalid anomaly parameters', code: 'INVALID_INPUT', details: parsed.error.flatten().fieldErrors });
+    }
+    const { history } = await store.getTelemetry();
+    const result = detectTelemetryAnomalies(history, parsed.data.sensitivity ?? 2, parsed.data.window ?? 30);
+    recordAudit(req, 'ai.anomaly', 'telemetry', 'allowed', `${result.anomalies.length} anomalies (risk ${result.riskLevel})`);
+    res.json(result);
+  }));
+
+  // Rule-based alert correlation: cluster alerts by MITRE technique + source IP
+  app.post('/api/ai/correlate', requireAuth, requirePermission('alerts:read'), limiters.ai, ah(async (req, res) => {
+    const parsed = AICorrelateSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({ error: 'Invalid correlation parameters', code: 'INVALID_INPUT', details: parsed.error.flatten().fieldErrors });
+    }
+    const { alerts } = await store.listAlerts({});
+    const result = correlateAlerts(alerts, parsed.data.windowMinutes ?? 60);
+    recordAudit(req, 'ai.correlate', 'alerts', 'allowed', `${result.clusters.length} clusters from ${result.analyzedAlerts} alerts`);
+    res.json(result);
+  }));
+
+  // AI CTF hint: LLM nudge for a stuck player. The prompt is built from public
+  // challenge metadata only — the flag never enters the prompt or the response.
+  app.post('/api/ai/ctf-hint', requireAuth, requirePermission('ctf:hints'), limiters.ai, ah(async (req, res) => {
+    const parsed = AICtfHintSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: 'challengeId is required', code: 'INVALID_INPUT' });
+    }
+    const ch = await store.getChallenge(parsed.data.challengeId);
+    if (!ch) return res.status(404).json({ error: 'Challenge not found' });
+
+    try {
+      const gemini = getGeminiClient();
+      if (gemini) {
+        const prompt = `You are a CTF coach. Give ONE concise nudge (2-3 sentences) to a player stuck on this challenge. Do NOT reveal the flag or the full solution.
+Challenge: category=${ch.category}, difficulty=${ch.difficulty}, title="${ch.title}"
+Description: ${ch.description}${ch.artifactSnippet ? `\nArtifact snippet:\n${ch.artifactSnippet.slice(0, 400)}` : ''}`;
+        const response = await gemini.models.generateContent({
+          model: 'gemini-3.8-flash',
+          contents: prompt,
+        });
+        const hintText = (response.text || '').trim();
+        if (hintText) {
+          recordAudit(req, 'ai.ctfHint', `challenge:${ch.id}`, 'allowed', 'generated');
+          return res.json({ hint: hintText.slice(0, 600), source: 'ai' });
+        }
+      }
+    } catch (err: any) {
+      console.warn('Gemini ctf-hint fallback:', err?.message || err);
+    }
+
+    recordAudit(req, 'ai.ctfHint', `challenge:${ch.id}`, 'allowed', 'built-in hint');
+    res.json({ hint: ch.hint, source: 'builtin' });
+  }));
 
   // Cross-module workflow: Convert Alert to CTF Challenge or Training Scenario
-  app.post('/api/alerts/:id/convert-to-ctf', requireAuth, requirePermission('alerts:triage'), mutationLimiter, (req: AuthedRequest, res) => {
-    const alert = alerts.find(a => a.id === req.params.id);
+  app.post('/api/alerts/:id/convert-to-ctf', requireAuth, requirePermission('alerts:triage'), limiters.mutation, ah(async (req, res) => {
+    const alert = await store.getAlert(req.params.id);
     if (!alert) return res.status(404).json({ error: 'Alert not found' });
 
     const newChallenge: CTFChallengeItem = {
@@ -1325,15 +855,15 @@ Return JSON with exact structure:
       author: 'SOC Automated Scenario Builder',
     };
 
-    ctfChallenges.unshift(newChallenge);
+    await store.addChallenge(newChallenge);
     recordAudit(req, 'alerts.convertToCTF', `alert:${alert.id}`, 'allowed', `challenge:${newChallenge.id}`);
     // Broadcast the public (flag-less) shape — never leak flags over SSE
     broadcastSSE('ctf:new_challenge', publicChallenge(newChallenge));
     res.json({ success: true, challenge: publicChallenge(newChallenge) });
-  });
+  }));
 
   // Simulation injector for demonstration
-  app.post('/api/simulation/inject', requireAuth, requirePermission('alerts:create'), mutationLimiter, (req: AuthedRequest, res) => {
+  app.post('/api/simulation/inject', requireAuth, requirePermission('alerts:create'), limiters.mutation, ah(async (req, res) => {
     const parsed = SimulationSchema.safeParse(req.body);
     if (!parsed.success) {
       return res.status(400).json({ error: 'Invalid scenario. Use: ransomware | beacon | sqli', code: 'INVALID_INPUT' });
@@ -1391,16 +921,18 @@ Return JSON with exact structure:
       };
     }
 
-    addAlertBounded(alerts, newAlert);
+    await store.createAlert(newAlert);
     recordAudit(req, 'simulation.inject', `scenario:${scenario}`, 'allowed', newAlert.title);
     broadcastSSE('alert:new', newAlert);
     res.json({ success: true, alert: newAlert });
-  });
+  }));
 
   // -------------------------------------------------------------
   // Vite Middleware (Dev) or Static dist serving (Prod)
   // -------------------------------------------------------------
   if (process.env.NODE_ENV !== 'production') {
+    // Vite is a dev-only dependency; dynamic import keeps it out of the prod bundle.
+    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
@@ -1414,9 +946,44 @@ Return JSON with exact structure:
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Unified SOC & Training Platform Server running on http://0.0.0.0:${PORT}`);
+  // JSON error handler (async route rejections land here)
+  app.use((err: any, req: express.Request, res: express.Response, _next: express.NextFunction) => {
+    console.error('[server] unhandled error:', err?.message || err);
+    if (res.headersSent) return;
+    res.status(500).json({ error: 'Internal server error', code: 'INTERNAL' });
   });
+
+  const server = app.listen(PORT, '0.0.0.0', () => {
+    console.log(`Unified SOC & Training Platform Server running on http://0.0.0.0:${PORT}`);
+    console.log(`[server] storage=${store.kind} redis=${redisUrl ? 'connected' : 'disabled'}`);
+  });
+
+  // Background simulation ticker — live telemetry every 5s
+  setInterval(() => {
+    const point = {
+      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+      eps: Math.floor(450 + Math.random() * 350),
+      networkMbps: Math.floor(110 + Math.random() * 95),
+      cpuUsage: Math.floor(38 + Math.random() * 40),
+      threatsBlocked: Math.floor(3 + Math.random() * 12),
+    };
+    void store.appendTelemetry(point).catch((err) => console.warn('[telemetry] persist failed:', err?.message || err));
+    broadcastSSE('telemetry:live', point);
+  }, 5000);
+
+  // Graceful shutdown (docker stop / SIGTERM)
+  const shutdown = async () => {
+    console.log('[server] shutting down...');
+    server.close();
+    await store.close();
+    relay?.close();
+    process.exit(0);
+  };
+  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', shutdown);
 }
 
-startServer();
+startServer().catch((err) => {
+  console.error('[server] fatal startup error:', err);
+  process.exit(1);
+});

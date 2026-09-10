@@ -156,3 +156,53 @@ export interface UserSession {
   score: number;
   solvedChallenges?: string[];
 }
+
+export interface MetricBaseline {
+  mean: number;
+  std: number;
+  min: number;
+  max: number;
+  current: number;
+}
+
+export interface AnomalyPoint {
+  timestamp: string;
+  metric: string;
+  value: number;
+  mean: number;
+  std: number;
+  zScore: number;
+  severity: 'medium' | 'high' | 'critical';
+}
+
+export interface AnomalyResult {
+  window: number;
+  analyzedPoints: number;
+  sensitivity: number;
+  baseline: Record<string, MetricBaseline>;
+  anomalies: AnomalyPoint[];
+  summary: string;
+  riskLevel: 'low' | 'medium' | 'high' | 'critical';
+}
+
+export interface CorrelationCluster {
+  key: string;
+  technique: string;
+  tactic: string;
+  sourceIp: string;
+  destIps: string[];
+  assets: string[];
+  alertIds: string[];
+  count: number;
+  timeSpanMinutes: number;
+  severity: 'low' | 'medium' | 'high' | 'critical';
+  investigation: string;
+  recommendedAction: string;
+}
+
+export interface CorrelationResult {
+  windowMinutes: number;
+  analyzedAlerts: number;
+  clusters: CorrelationCluster[];
+  summary: string;
+}
