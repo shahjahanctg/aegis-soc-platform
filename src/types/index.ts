@@ -263,5 +263,28 @@ export interface AppSettings {
   alertRetention: number;
   telemetryRetention: number;
   analysisRetention: number;
+  passwordMaxAgeDays: number;
   geminiConfigured: boolean;
+}
+
+export interface InviteRecord {
+  id: string;
+  email: string;
+  name: string;
+  role: 'admin' | 'analyst' | 'trainer' | 'viewer';
+  expiresAt: string;
+  consumedAt: string | null;
+  revoked: boolean;
+}
+
+export interface AuditEntry {
+  id: string;
+  timestamp: string;
+  actorName: string;
+  actorRole: string;
+  action: string;
+  resource: string;
+  outcome: string;
+  ip: string;
+  detail?: string;
 }

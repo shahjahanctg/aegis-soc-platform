@@ -146,6 +146,104 @@ echo '{"username":"tempuser","password":"Rotated_Pass_2026!"}' > "$TMP/deletedlo
 code=$(http POST /api/auth/login "$TMP/deletedlogin.json")
 [ "$code" = "401" ] && ok "deleted user login -> 401" || bad "deleted user login -> $code (want 401)"
 
+# 2c. Role editing + password policy + self-service change ----------------------
+say "\n[2c] Role editing, password policy, change-password"
+code=$(http GET /api/users "" "$ADMIN")
+ANALYST_ID=$(extract "$TMP/body" "j.users.find(function(u){return u.username==='analyst'}).id")
+TRAINER_ID=$(extract "$TMP/body" "j.users.find(function(u){return u.username==='trainer'}).id")
+# Admin changes the trainer's role to analyst, then back
+echo '{"role":"analyst"}' > "$TMP/role.json"
+code=$(http PATCH "/api/users/$TRAINER_ID/role" "$TMP/role.json" "$ADMIN")
+[ "$code" = "200" ] && [ "$(extract "$TMP/body" 'j.role')" = "analyst" ] && ok "admin changed trainer -> analyst role" || bad "update role -> $code"
+echo '{"role":"trainer"}' > "$TMP/role.json"
+code=$(http PATCH "/api/users/$TRAINER_ID/role" "$TMP/role.json" "$ADMIN")
+[ "$code" = "200" ] && ok "role changed back to trainer" || bad "revert role -> $code"
+# Cannot change own role; non-admin cannot change roles
+code=$(http PATCH "/api/users/$ADMIN_ID/role" "$TMP/role.json" "$ADMIN")
+[ "$code" = "400" ] && ok "cannot change own role (400)" || bad "self role -> $code (want 400)"
+code=$(http PATCH "/api/users/$ANALYST_ID/role" "$TMP/role.json" "$ANA")
+[ "$code" = "403" ] && ok "non-admin denied role change (403)" || bad "analyst role change -> $code (want 403)"
+
+# Password policy: weak passwords rejected at create
+for weak in "short1A" "alllowercase1!" "NODIGITS_Only!" "NoSpecialChar1"; do
+  echo "{\"username\":\"weakcheck\",\"name\":\"Weak\",\"password\":\"$weak\",\"role\":\"analyst\"}" > "$TMP/weak.json"
+  code=$(http POST /api/users "$TMP/weak.json" "$ADMIN")
+  [ "$code" = "400" ] && ok "weak password '$weak' rejected (400)" || bad "weak password '$weak' -> $code (want 400)"
+done
+# Password containing username rejected
+echo '{"username":"policytest","name":"Policy Test","password":"Policytest_2026!","role":"analyst"}' > "$TMP/weak2.json"
+code=$(http POST /api/users "$TMP/weak2.json" "$ADMIN")
+[ "$code" = "400" ] && ok "password containing username rejected (400)" || bad "username-in-password -> $code (want 400)"
+
+# Self-service change-password: old stops working, new works
+echo '{"oldPassword":"E2E_Pass_2026!","newPassword":"Rotated_Analyst_2026!"}' > "$TMP/changepw.json"
+code=$(http POST /api/auth/change-password "$TMP/changepw.json" "$ANA")
+[ "$code" = "200" ] && ok "analyst changed own password" || bad "change password -> $code"
+echo '{"username":"analyst","password":"E2E_Pass_2026!"}' > "$TMP/analystold.json"
+code=$(http POST /api/auth/login "$TMP/analystold.json")
+[ "$code" = "401" ] && ok "old password rejected after self-change" || bad "old password after change -> $code (want 401)"
+ANA=$(login analyst "Rotated_Analyst_2026!") || { bad "analyst login with new password failed"; exit 1; }
+ok "analyst login with new password"
+# Wrong current password rejected
+echo '{"oldPassword":"WRONG_password_2026!","newPassword":"Another_Rot_2026!"}' > "$TMP/changepw.json"
+code=$(http POST /api/auth/change-password "$TMP/changepw.json" "$ANA")
+[ "$code" = "401" ] && ok "wrong current password rejected (401)" || bad "wrong current -> $code (want 401)"
+
+# 2d. Invitations: create -> validate -> accept -> revoked ----------------------
+say "\n[2d] Invitations (one-time setup links)"
+code=$(http GET /api/invites "" "$ANA")
+[ "$code" = "403" ] && ok "non-admin denied invites list (403)" || bad "analyst invites -> $code (want 403)"
+echo '{"email":"new.hire@example.com","name":"New Hire","role":"analyst"}' > "$TMP/invite.json"
+code=$(http POST /api/invites "$TMP/invite.json" "$ADMIN")
+[ "$code" = "200" ] && ok "admin created invite" || bad "create invite -> $code"
+INVITE_TOKEN=$(extract "$TMP/body" 'j.setupToken')
+INVITE_ID=$(extract "$TMP/body" 'j.invite.id')
+[ -n "$INVITE_TOKEN" ] && [ "$INVITE_TOKEN" != "__ERR__" ] && ok "setup token issued" || bad "missing setup token"
+
+# Validate (public, no auth)
+code=$(curl -s -o "$TMP/body" -w "%{http_code}" "$BASE_URL/api/invites/validate?token=$INVITE_TOKEN")
+[ "$code" = "200" ] && [ "$(extract "$TMP/body" 'j.invite.email')" = "new.hire@example.com" ] && ok "invite validates (public endpoint)" || bad "validate invite -> $code"
+# Accept with a weak password rejected (policy enforced)
+echo "{\"token\":\"$INVITE_TOKEN\",\"username\":\"newhire\",\"name\":\"New Hire\",\"password\":\"weakpass\"}" > "$TMP/inviteaccept.json"
+code=$(http POST /api/invites/accept "$TMP/inviteaccept.json")
+[ "$code" = "400" ] && ok "invite accept enforces password policy (400)" || bad "weak accept -> $code (want 400)"
+# Accept properly -> account created + auto-login (password must not contain the username)
+echo "{\"token\":\"$INVITE_TOKEN\",\"username\":\"newhire\",\"name\":\"New Hire\",\"password\":\"Seaside_Quota_2026!\"}" > "$TMP/inviteaccept.json"
+code=$(http POST /api/invites/accept "$TMP/inviteaccept.json")
+[ "$code" = "200" ] && [ "$(extract "$TMP/body" 'j.user.username')" = "newhire" ] && ok "invite accepted, account created + signed in" || bad "accept invite -> $code"
+# Token is one-time: second accept fails, and the invite shows as used
+code=$(http POST /api/invites/accept "$TMP/inviteaccept.json")
+[ "$code" = "404" ] && ok "token single-use (second accept -> 404)" || bad "second accept -> $code (want 404)"
+code=$(http GET /api/invites "" "$ADMIN")
+USED=$(extract "$TMP/body" "j.invites.find(function(i){return i.id==='$INVITE_ID'}).consumedAt")
+[ -n "$USED" ] && [ "$USED" != "null" ] && ok "invite marked consumed" || bad "invite not marked consumed"
+
+# Second invite: revoked link stops validating
+code=$(http POST /api/invites "$TMP/invite.json" "$ADMIN")
+INVITE2_TOKEN=$(extract "$TMP/body" 'j.setupToken')
+INVITE2_ID=$(extract "$TMP/body" 'j.invite.id')
+code=$(http DELETE "/api/invites/$INVITE2_ID" "" "$ADMIN")
+[ "$code" = "200" ] && ok "admin revoked invite" || bad "revoke invite -> $code"
+code=$(curl -s -o "$TMP/body" -w "%{http_code}" "$BASE_URL/api/invites/validate?token=$INVITE2_TOKEN")
+[ "$code" = "404" ] && ok "revoked invite no longer validates (404)" || bad "revoked validate -> $code (want 404)"
+
+# 2e. Password expiry gate (login -> 403 PASSWORD_EXPIRED -> rotate) ---------------
+say "\n[2e] Password expiry gate"
+say "  (backdating password_changed_at via psql)"
+if command -v docker >/dev/null 2>&1 && docker compose exec -T postgres psql -U aegis -d aegis -c "UPDATE users SET password_changed_at = now() - interval '400 days' WHERE username = 'newhire'" >/dev/null 2>&1; then
+  echo '{"username":"newhire","password":"Seaside_Quota_2026!"}' > "$TMP/expired.json"
+  code=$(http POST /api/auth/login "$TMP/expired.json")
+  [ "$code" = "403" ] && [ "$(extract "$TMP/body" 'j.code')" = "PASSWORD_EXPIRED" ] && ok "expired password login -> 403 PASSWORD_EXPIRED" || bad "expired login -> $code (want 403+PASSWORD_EXPIRED)"
+  echo '{"username":"newhire","oldPassword":"Seaside_Quota_2026!","newPassword":"Rotated_Quota_2026!"}' > "$TMP/rotate.json"
+  code=$(http POST /api/auth/expired-password "$TMP/rotate.json")
+  [ "$code" = "200" ] && [ "$(extract "$TMP/body" 'j.user.username')" = "newhire" ] && ok "expired-password rotation succeeds + signs in" || bad "expired-password rotate -> $code"
+  echo '{"username":"newhire","password":"Rotated_Quota_2026!"}' > "$TMP/rotatedlogin.json"
+  code=$(http POST /api/auth/login "$TMP/rotatedlogin.json")
+  [ "$code" = "200" ] && ok "login works after rotation" || bad "login after rotation -> $code"
+else
+  say "  (skipped — psql not reachable)"
+fi
+
 # 3. Alerts: platform starts empty, alerts created via API ---------------------
 say "\n[3] Alerts (empty start)"
 code=$(http GET "/api/alerts" "" "$ANA")

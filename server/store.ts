@@ -64,6 +64,15 @@ export interface Store {
   createUser(input: { username: string; name: string; password: string; role: Role }): Promise<ManagedUser>;
   deleteUser(id: string): Promise<ManagedUser | null>;
   resetUserPassword(id: string, newPassword: string): Promise<ManagedUser | null>;
+  updateUserRole(id: string, role: Role): Promise<ManagedUser | null>;
+  changePassword(id: string, newPassword: string): Promise<ManagedUser | null>;
+  passwordChangedAt(id: string): Promise<Date | null>;
+  // invitations (one-time setup links)
+  createInvite(input: { tokenHash: string; email: string; name: string; role: Role; createdBy: string; expiresAt: string }): Promise<InviteRecord>;
+  listInvites(): Promise<InviteRecord[]>;
+  getInviteByHash(hash: string): Promise<InviteRecord | null>;
+  acceptInvite(id: string, input: { username: string; name: string; password: string }): Promise<ManagedUser>;
+  revokeInvite(id: string): Promise<boolean>;
   // settings
   getSettings(): Promise<StoredSettings>;
   updateSettings(patch: Partial<StoredSettings>): Promise<StoredSettings>;
@@ -115,6 +124,7 @@ export interface Store {
 export interface UserRecord extends SafeUser {
   passwordSalt: string;
   passwordHash: string;
+  passwordChangedAt?: string; // ISO; set on create/change/reset
   score: number;
 }
 
@@ -156,6 +166,7 @@ export function makeAdminUser(): UserRecord {
     badge: 'Commander',
     passwordSalt: salt,
     passwordHash: hash,
+    passwordChangedAt: new Date().toISOString(),
     score: 0,
   };
 }
@@ -169,6 +180,7 @@ export function makeUser(username: string, name: string, password: string, role:
     role,
     passwordSalt: salt,
     passwordHash: hash,
+    passwordChangedAt: new Date().toISOString(),
     score: 0,
   };
 }
@@ -187,6 +199,7 @@ export interface StoredSettings {
   telemetryRetention: number;
   analysisRetention: number;
   geminiApiKey: string | null;
+  passwordMaxAgeDays: number; // 0 = never expire
 }
 
 export const DEFAULT_SETTINGS: StoredSettings = {
@@ -194,6 +207,7 @@ export const DEFAULT_SETTINGS: StoredSettings = {
   telemetryRetention: 2000,
   analysisRetention: 500,
   geminiApiKey: null,
+  passwordMaxAgeDays: 90,
 };
 
 export function publicSettings(s: StoredSettings) {
@@ -202,6 +216,31 @@ export function publicSettings(s: StoredSettings) {
     telemetryRetention: s.telemetryRetention,
     analysisRetention: s.analysisRetention,
     geminiConfigured: !!s.geminiApiKey,
+    passwordMaxAgeDays: s.passwordMaxAgeDays,
+  };
+}
+
+export interface InviteRecord {
+  id: string;
+  tokenHash: string; // never exposed to the client
+  email: string;
+  name: string;
+  role: Role;
+  createdBy: string;
+  expiresAt: string;
+  consumedAt: string | null;
+  revoked: boolean;
+}
+
+export function publicInvite(i: InviteRecord) {
+  return {
+    id: i.id,
+    email: i.email,
+    name: i.name,
+    role: i.role,
+    expiresAt: i.expiresAt,
+    consumedAt: i.consumedAt,
+    revoked: i.revoked,
   };
 }
 
@@ -224,6 +263,7 @@ class MemoryStore implements Store {
   private dfir: DFIRTimelineEvent[];
   private telemetry: TelemetryPoint[];
   private memoryAudit: AuditEntry[] = [];
+  private invites: InviteRecord[] = [];
   // Per-user state (Phase 2)
   private progressKeys = new Set<string>();      // `${userId}:${courseId}:${lessonId}`
   private solveKeys = new Set<string>();         // `${userId}:${challengeId}`
@@ -293,7 +333,69 @@ class MemoryStore implements Store {
     const { salt, hash } = hashPassword(newPassword);
     user.passwordSalt = salt;
     user.passwordHash = hash;
+    user.passwordChangedAt = new Date().toISOString();
     return { id: user.id, username: user.username, name: user.name, role: user.role, badge: user.badge, score: user.score };
+  }
+
+  async updateUserRole(id: string, role: Role): Promise<ManagedUser | null> {
+    const user = this.users.find((u) => u.id === id);
+    if (!user) return null;
+    user.role = role;
+    return { id: user.id, username: user.username, name: user.name, role: user.role, badge: user.badge, score: user.score };
+  }
+
+  async changePassword(id: string, newPassword: string): Promise<ManagedUser | null> {
+    const user = this.users.find((u) => u.id === id);
+    if (!user) return null;
+    const { salt, hash } = hashPassword(newPassword);
+    user.passwordSalt = salt;
+    user.passwordHash = hash;
+    user.passwordChangedAt = new Date().toISOString();
+    return { id: user.id, username: user.username, name: user.name, role: user.role, badge: user.badge, score: user.score };
+  }
+
+  async passwordChangedAt(id: string): Promise<Date | null> {
+    const user = this.users.find((u) => u.id === id);
+    return user?.passwordChangedAt ? new Date(user.passwordChangedAt) : null;
+  }
+
+  async createInvite(input: { tokenHash: string; email: string; name: string; role: Role; createdBy: string; expiresAt: string }): Promise<InviteRecord> {
+    const invite: InviteRecord = {
+      id: `inv-${crypto.randomUUID().slice(0, 8)}`,
+      tokenHash: input.tokenHash,
+      email: input.email.trim().toLowerCase(),
+      name: input.name.trim(),
+      role: input.role,
+      createdBy: input.createdBy,
+      expiresAt: input.expiresAt,
+      consumedAt: null,
+      revoked: false,
+    };
+    this.invites.push(invite);
+    return invite;
+  }
+
+  async listInvites(): Promise<InviteRecord[]> {
+    return [...this.invites];
+  }
+
+  async getInviteByHash(hash: string): Promise<InviteRecord | null> {
+    return this.invites.find((i) => i.tokenHash === hash) ?? null;
+  }
+
+  async acceptInvite(id: string, input: { username: string; name: string; password: string }): Promise<ManagedUser> {
+    const invite = this.invites.find((i) => i.id === id);
+    if (!invite || invite.revoked || invite.consumedAt) throw new Error('INVITE_INVALID');
+    if (new Date(invite.expiresAt) < new Date()) throw new Error('INVITE_EXPIRED');
+    invite.consumedAt = new Date().toISOString();
+    return this.createUser({ username: input.username, name: input.name, password: input.password, role: invite.role });
+  }
+
+  async revokeInvite(id: string): Promise<boolean> {
+    const invite = this.invites.find((i) => i.id === id);
+    if (!invite) return false;
+    invite.revoked = true;
+    return true;
   }
 
   async getSettings(): Promise<StoredSettings> {
@@ -585,9 +687,21 @@ CREATE TABLE IF NOT EXISTS audit_log (
 );
 CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_log(timestamp DESC);
 
--- Per-user progress (Phase 2): lesson completions, CTF solves, hint unlocks.
--- Challenges/courses themselves are shared; completion state is per user.
+-- Password lifecycle: change timestamp (for policy expiry) + invites.
 ALTER TABLE users ADD COLUMN IF NOT EXISTS score INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS password_changed_at TIMESTAMPTZ;
+CREATE TABLE IF NOT EXISTS invites (
+  id TEXT PRIMARY KEY,
+  token_hash TEXT UNIQUE NOT NULL,
+  email TEXT NOT NULL,
+  name TEXT NOT NULL,
+  role TEXT NOT NULL,
+  created_by TEXT NOT NULL,
+  expires_at TIMESTAMPTZ NOT NULL,
+  consumed_at TIMESTAMPTZ,
+  revoked BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 CREATE TABLE IF NOT EXISTS user_progress (
   user_id TEXT NOT NULL,
   course_id TEXT NOT NULL,
@@ -721,8 +835,8 @@ class PostgresStore implements Store {
     if (Number(r.rows[0].c) > 0) return;
     const admin = makeAdminUser();
     await this.pool.query(
-      `INSERT INTO users (id, username, name, role, badge, password_salt, password_hash) VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-      [admin.id, admin.username, admin.name, admin.role, admin.badge ?? null, admin.passwordSalt, admin.passwordHash],
+      `INSERT INTO users (id, username, name, role, badge, password_salt, password_hash, password_changed_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+      [admin.id, admin.username, admin.name, admin.role, admin.badge ?? null, admin.passwordSalt, admin.passwordHash, admin.passwordChangedAt],
     );
     console.log(`[store] provisioned admin account '${admin.username}' (no demo data)`);
   }
@@ -774,8 +888,8 @@ class PostgresStore implements Store {
     const user = makeUser(input.username, input.name, input.password, input.role);
     try {
       await this.pool.query(
-        `INSERT INTO users (id, username, name, role, badge, password_salt, password_hash) VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-        [user.id, user.username, user.name, user.role, user.badge ?? null, user.passwordSalt, user.passwordHash],
+        `INSERT INTO users (id, username, name, role, badge, password_salt, password_hash, password_changed_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+        [user.id, user.username, user.name, user.role, user.badge ?? null, user.passwordSalt, user.passwordHash, user.passwordChangedAt],
       );
     } catch (err: any) {
       if (String(err?.code).startsWith('23')) throw new Error('USERNAME_TAKEN'); // unique violation
@@ -816,12 +930,117 @@ class PostgresStore implements Store {
     const r = await this.pool.query('SELECT id, username, name, role, badge, score FROM users WHERE id = $1', [id]);
     if (!r.rows[0]) return null;
     const { salt, hash } = hashPassword(newPassword);
-    await this.pool.query('UPDATE users SET password_salt = $2, password_hash = $3 WHERE id = $1', [id, salt, hash]);
+    await this.pool.query(
+      'UPDATE users SET password_salt = $2, password_hash = $3, password_changed_at = now() WHERE id = $1',
+      [id, salt, hash],
+    );
     const row = r.rows[0];
     return {
       id: row.id, username: row.username, name: row.name,
       role: row.role, badge: row.badge ?? undefined, score: row.score,
     };
+  }
+
+  async updateUserRole(id: string, role: Role): Promise<ManagedUser | null> {
+    const r = await this.pool.query(
+      'UPDATE users SET role = $2 WHERE id = $1 RETURNING id, username, name, role, badge, score',
+      [id, role],
+    );
+    const row = r.rows[0];
+    if (!row) return null;
+    return {
+      id: row.id, username: row.username, name: row.name,
+      role: row.role, badge: row.badge ?? undefined, score: row.score,
+    };
+  }
+
+  async changePassword(id: string, newPassword: string): Promise<ManagedUser | null> {
+    const { salt, hash } = hashPassword(newPassword);
+    const r = await this.pool.query(
+      'UPDATE users SET password_salt = $2, password_hash = $3, password_changed_at = now() WHERE id = $1 RETURNING id, username, name, role, badge, score',
+      [id, salt, hash],
+    );
+    const row = r.rows[0];
+    if (!row) return null;
+    return {
+      id: row.id, username: row.username, name: row.name,
+      role: row.role, badge: row.badge ?? undefined, score: row.score,
+    };
+  }
+
+  async passwordChangedAt(id: string): Promise<Date | null> {
+    const r = await this.pool.query('SELECT password_changed_at FROM users WHERE id = $1', [id]);
+    return r.rows[0]?.password_changed_at ? new Date(r.rows[0].password_changed_at) : null;
+  }
+
+  async createInvite(input: { tokenHash: string; email: string; name: string; role: Role; createdBy: string; expiresAt: string }): Promise<InviteRecord> {
+    const id = `inv-${crypto.randomUUID().slice(0, 8)}`;
+    await this.pool.query(
+      `INSERT INTO invites (id, token_hash, email, name, role, created_by, expires_at) VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+      [id, input.tokenHash, input.email.trim().toLowerCase(), input.name.trim(), input.role, input.createdBy, input.expiresAt],
+    );
+    return {
+      id, tokenHash: input.tokenHash, email: input.email.trim().toLowerCase(), name: input.name.trim(),
+      role: input.role, createdBy: input.createdBy, expiresAt: input.expiresAt, consumedAt: null, revoked: false,
+    };
+  }
+
+  async listInvites(): Promise<InviteRecord[]> {
+    const r = await this.pool.query(
+      `SELECT id, token_hash, email, name, role, created_by, expires_at, consumed_at, revoked FROM invites ORDER BY created_at DESC`,
+    );
+    return r.rows.map((row: any) => ({
+      id: row.id, tokenHash: row.token_hash, email: row.email, name: row.name, role: row.role,
+      createdBy: row.created_by, expiresAt: row.expires_at.toISOString(),
+      consumedAt: row.consumed_at ? row.consumed_at.toISOString() : null, revoked: row.revoked,
+    }));
+  }
+
+  async getInviteByHash(hash: string): Promise<InviteRecord | null> {
+    const r = await this.pool.query(
+      `SELECT id, token_hash, email, name, role, created_by, expires_at, consumed_at, revoked FROM invites WHERE token_hash = $1`,
+      [hash],
+    );
+    const row = r.rows[0];
+    if (!row) return null;
+    return {
+      id: row.id, tokenHash: row.token_hash, email: row.email, name: row.name, role: row.role,
+      createdBy: row.created_by, expiresAt: row.expires_at.toISOString(),
+      consumedAt: row.consumed_at ? row.consumed_at.toISOString() : null, revoked: row.revoked,
+    };
+  }
+
+  async acceptInvite(id: string, input: { username: string; name: string; password: string }): Promise<ManagedUser> {
+    const r = await this.pool.query(
+      `SELECT id, email, name, role, expires_at, consumed_at, revoked FROM invites WHERE id = $1`,
+      [id],
+    );
+    const invite = r.rows[0];
+    if (!invite || invite.revoked || invite.consumed_at) throw new Error('INVITE_INVALID');
+    if (new Date(invite.expires_at) < new Date()) throw new Error('INVITE_EXPIRED');
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('UPDATE invites SET consumed_at = now() WHERE id = $1', [id]);
+      const user = makeUser(input.username, input.name, input.password, invite.role);
+      await client.query(
+        `INSERT INTO users (id, username, name, role, badge, password_salt, password_hash, password_changed_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+        [user.id, user.username, user.name, user.role, user.badge ?? null, user.passwordSalt, user.passwordHash, user.passwordChangedAt],
+      );
+      await client.query('COMMIT');
+      return { id: user.id, username: user.username, name: user.name, role: user.role, badge: user.badge, score: 0 };
+    } catch (err: any) {
+      await client.query('ROLLBACK');
+      if (String(err?.code).startsWith('23')) throw new Error('USERNAME_TAKEN');
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  async revokeInvite(id: string): Promise<boolean> {
+    const r = await this.pool.query('UPDATE invites SET revoked = TRUE WHERE id = $1', [id]);
+    return (r.rowCount ?? 0) > 0;
   }
 
   // -- settings -------------------------------------------------------------

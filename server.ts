@@ -9,12 +9,12 @@ import {
   requirePermission, requireIngestAuth, sseAuth, createLimiters, setUserLookup,
   toSessionUser, JWT_ACCESS_TTL_SEC, type Role, type AuthedRequest,
 } from './server/security';
-import { LoginSchema, RefreshSchema, CreateUserSchema, ResetPasswordSchema, SettingsUpdateSchema, TriageSchema, CreateAlertSchema, IngestSchema, IOCAddSchema, CampaignLaunchSchema, FlagSubmitSchema, HintUnlockSchema, DFIRAddSchema, AIChatSchema, AITriageSchema, AINlToRulesSchema, AIPhishingSchema, AITriageVerdictSchema, AIPhishingAnalysisSchema, AIAnomalySchema, AICorrelateSchema, AICtfHintSchema } from './server/schemas';
+import { LoginSchema, RefreshSchema, CreateUserSchema, ResetPasswordSchema, UpdateRoleSchema, ChangePasswordSchema, ExpiredPasswordSchema, InviteCreateSchema, InviteAcceptSchema, SettingsUpdateSchema, TriageSchema, CreateAlertSchema, IngestSchema, IOCAddSchema, CampaignLaunchSchema, FlagSubmitSchema, HintUnlockSchema, DFIRAddSchema, AIChatSchema, AITriageSchema, AINlToRulesSchema, AIPhishingSchema, AITriageVerdictSchema, AIPhishingAnalysisSchema, AIAnomalySchema, AICorrelateSchema, AICtfHintSchema } from './server/schemas';
 import { extractJson, detectTelemetryAnomalies, correlateAlerts } from './server/ai';
 import { parseLogLine, analyzeEvents, buildAnalysisSummary, findingToAlert } from './server/logParser';
 import { recordAudit, setAuditBroadcaster, setAuditSink, setAuditSource, getAuditLog } from './server/audit';
 import { makeAlertId } from './server/alertsStore';
-import { createStore, publicSettings, type Store } from './server/store';
+import { createStore, publicSettings, publicInvite, type Store } from './server/store';
 import { createSSERelay, createRateLimitStores, type SSERelay } from './server/redis';
 import type {
   AlertItem, IOCItem, CourseItem, PhishingCampaignItem, CTFChallengeItem, DFIRTimelineEvent, AnalysisRun,
@@ -166,6 +166,24 @@ async function startServer() {
       return res.status(401).json({ error: 'Invalid username or password', code: 'BAD_CREDENTIALS' });
     }
 
+    // Password-expiry gate (0 = never expire). Expired users must set a new
+    // password via POST /api/auth/expired-password before using the platform.
+    const settings = await store.getSettings();
+    if (settings.passwordMaxAgeDays > 0) {
+      const changedAt = await store.passwordChangedAt(user.id);
+      if (changedAt) {
+        const maxAgeMs = settings.passwordMaxAgeDays * 24 * 60 * 60 * 1000;
+        if (Date.now() - changedAt.getTime() > maxAgeMs) {
+          recordAudit(req, 'auth.login', `user:${user.username}`, 'denied', 'Password expired');
+          return res.status(403).json({
+            error: 'Your password has expired. Set a new one to continue.',
+            code: 'PASSWORD_EXPIRED',
+            username: user.username,
+          });
+        }
+      }
+    }
+
     const accessToken = await issueAccessToken(user);
     const refreshToken = await issueRefreshToken(user);
     recordAudit(req, 'auth.login', `user:${user.username}`, 'allowed');
@@ -258,6 +276,144 @@ async function startServer() {
     if (!deleted) return res.status(404).json({ error: 'User not found' });
     recordAudit(req, 'users.delete', `user:${deleted.username}`, 'allowed', `role=${deleted.role}`);
     res.json({ success: true, user: deleted });
+  }));
+
+  app.patch('/api/users/:id/role', requireAuth, requirePermission('admin'), limiters.mutation, ah(async (req, res) => {
+    if (req.params.id === req.user!.id) {
+      return res.status(400).json({ error: 'You cannot change your own role', code: 'SELF_ROLE' });
+    }
+    const parsed = UpdateRoleSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: 'Invalid role', code: 'INVALID_INPUT', details: parsed.error.flatten().fieldErrors });
+    }
+    const target = await store.findUserById(req.params.id);
+    if (!target) return res.status(404).json({ error: 'User not found' });
+    if (target.role === 'admin' && parsed.data.role !== 'admin') {
+      const admins = (await store.listUsers()).filter((u) => u.role === 'admin');
+      if (admins.length <= 1) {
+        return res.status(400).json({ error: 'Cannot demote the last admin account', code: 'LAST_ADMIN' });
+      }
+    }
+    const updated = await store.updateUserRole(req.params.id, parsed.data.role);
+    if (!updated) return res.status(404).json({ error: 'User not found' });
+    recordAudit(req, 'users.updateRole', `user:${updated.username}`, 'allowed', `role=${updated.role}`);
+    res.json(updated);
+  }));
+
+  // -------------------------------------------------------------
+  // Self-service password change + expiry recovery (authenticated)
+  // -------------------------------------------------------------
+  app.post('/api/auth/change-password', requireAuth, limiters.mutation, ah(async (req: AuthedRequest, res) => {
+    const parsed = ChangePasswordSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: 'Invalid payload', code: 'INVALID_INPUT', details: parsed.error.flatten().fieldErrors });
+    }
+    const ok = await store.verifyPassword(req.user!.username, parsed.data.oldPassword);
+    if (!ok) {
+      recordAudit(req, 'auth.changePassword', `user:${req.user!.username}`, 'denied', 'Wrong current password');
+      return res.status(401).json({ error: 'Current password is incorrect', code: 'BAD_CREDENTIALS' });
+    }
+    await store.changePassword(req.user!.id, parsed.data.newPassword);
+    recordAudit(req, 'auth.changePassword', `user:${req.user!.username}`, 'allowed');
+    res.json({ success: true });
+  }));
+
+  // Unauthenticated recovery for users whose password has expired (login gate).
+  app.post('/api/auth/expired-password', limiters.auth, ah(async (req, res) => {
+    const parsed = ExpiredPasswordSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: 'Invalid payload', code: 'INVALID_INPUT', details: parsed.error.flatten().fieldErrors });
+    }
+    const user = await store.verifyPassword(parsed.data.username, parsed.data.oldPassword);
+    if (!user) {
+      return res.status(401).json({ error: 'Invalid username or password', code: 'BAD_CREDENTIALS' });
+    }
+    await store.changePassword(user.id, parsed.data.newPassword);
+    recordAudit(req, 'auth.expiredPassword', `user:${user.username}`, 'allowed', 'password rotated after expiry');
+    const accessToken = await issueAccessToken(user);
+    const refreshToken = await issueRefreshToken(user);
+    res.json({ accessToken, refreshToken, expiresIn: JWT_ACCESS_TTL_SEC, user: toSessionUser(user) });
+  }));
+
+  // -------------------------------------------------------------
+  // Invitations (admin) — one-time setup links, hashed server-side
+  // -------------------------------------------------------------
+  app.get('/api/invites', requireAuth, requirePermission('admin'), ah(async (req, res) => {
+    const invites = await store.listInvites();
+    res.json({ invites: invites.map(publicInvite) });
+  }));
+
+  app.post('/api/invites', requireAuth, requirePermission('admin'), limiters.mutation, ah(async (req, res) => {
+    const parsed = InviteCreateSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: 'Invalid invite payload', code: 'INVALID_INPUT', details: parsed.error.flatten().fieldErrors });
+    }
+    const rawToken = crypto.randomBytes(24).toString('base64url');
+    const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
+    const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(); // 7 days
+    const invite = await store.createInvite({
+      tokenHash,
+      email: parsed.data.email,
+      name: parsed.data.name || '',
+      role: parsed.data.role,
+      createdBy: req.user!.id,
+      expiresAt,
+    });
+    recordAudit(req, 'invites.create', `invite:${invite.id}`, 'allowed', `role=${invite.role} email=${invite.email}`);
+    // The raw one-time token is returned exactly once — the accept flow only
+    // needs the hash, so it is safe to include in the client-facing link.
+    res.json({ invite: publicInvite(invite), setupToken: rawToken });
+  }));
+
+  app.delete('/api/invites/:id', requireAuth, requirePermission('admin'), limiters.mutation, ah(async (req, res) => {
+    const revoked = await store.revokeInvite(req.params.id);
+    if (!revoked) return res.status(404).json({ error: 'Invite not found' });
+    recordAudit(req, 'invites.revoke', `invite:${req.params.id}`, 'allowed');
+    res.json({ success: true });
+  }));
+
+  // Public: validates a setup token (no auth — the link is the credential).
+  app.get('/api/invites/validate', ah(async (req, res) => {
+    const token = String(req.query.token || '');
+    if (!token) return res.status(400).json({ error: 'token required', code: 'INVALID_INPUT' });
+    const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+    const invite = await store.getInviteByHash(tokenHash);
+    if (!invite || invite.revoked || invite.consumedAt) {
+      return res.status(404).json({ error: 'Invite is invalid, revoked, or already used', code: 'INVITE_INVALID' });
+    }
+    if (new Date(invite.expiresAt) < new Date()) {
+      return res.status(410).json({ error: 'Invite has expired', code: 'INVITE_EXPIRED' });
+    }
+    res.json({ invite: { id: invite.id, email: invite.email, name: invite.name, role: invite.role } });
+  }));
+
+  // Public: accepts a setup token (one-time). Body is InviteAcceptSchema.
+  app.post('/api/invites/accept', limiters.auth, ah(async (req, res) => {
+    const token = String(req.body?.token || '');
+    const parsed = InviteAcceptSchema.safeParse(req.body);
+    if (!token || !parsed.success) {
+      return res.status(400).json({ error: 'Invalid payload', code: 'INVALID_INPUT', details: parsed.error.flatten().fieldErrors });
+    }
+    const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+    const invite = await store.getInviteByHash(tokenHash);
+    if (!invite || invite.revoked || invite.consumedAt) {
+      return res.status(404).json({ error: 'Invite is invalid, revoked, or already used', code: 'INVITE_INVALID' });
+    }
+    try {
+      const user = await store.acceptInvite(invite.id, parsed.data);
+      recordAudit(req, 'invites.accept', `user:${user.username}`, 'allowed', `invite:${invite.id} role=${user.role}`);
+      const accessToken = await issueAccessToken(user);
+      const refreshToken = await issueRefreshToken(user);
+      res.json({ accessToken, refreshToken, expiresIn: JWT_ACCESS_TTL_SEC, user: toSessionUser(user) });
+    } catch (err: any) {
+      if (err?.message === 'USERNAME_TAKEN') {
+        return res.status(409).json({ error: 'Username already exists', code: 'USERNAME_TAKEN' });
+      }
+      if (err?.message === 'INVITE_INVALID' || err?.message === 'INVITE_EXPIRED') {
+        return res.status(404).json({ error: 'Invite is invalid or has expired', code: 'INVITE_INVALID' });
+      }
+      throw err;
+    }
   }));
 
   // -------------------------------------------------------------

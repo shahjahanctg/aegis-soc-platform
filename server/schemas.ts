@@ -15,21 +15,92 @@ export const RefreshSchema = z.object({
 
 export const RoleEnum = z.enum(['admin', 'analyst', 'trainer', 'viewer']);
 
+// ---------------------------------------------------------------------------
+// Password policy — enforced at creation, admin reset, self-change, and invites.
+// ---------------------------------------------------------------------------
+
+export const PASSWORD_POLICY = {
+  minLength: 8,
+  description: 'min 8 chars with uppercase, lowercase, a digit, and a special character, and must not contain the username',
+};
+
+export function passwordPolicyError(password: string, username?: string): string | null {
+  if (password.length < 8) return 'Password must be at least 8 characters';
+  if (!/[a-z]/.test(password)) return 'Password must contain a lowercase letter';
+  if (!/[A-Z]/.test(password)) return 'Password must contain an uppercase letter';
+  if (!/[0-9]/.test(password)) return 'Password must contain a digit';
+  if (!/[^A-Za-z0-9]/.test(password)) return 'Password must contain a special character';
+  if (username && password.toLowerCase().includes(username.toLowerCase())) return 'Password must not contain the username';
+  return null;
+}
+
 export const CreateUserSchema = z.object({
   username: z.string().min(2).max(64).regex(/^[a-zA-Z0-9_.-]+$/, 'Username may only contain letters, numbers, _ . -'),
   name: z.string().min(1).max(120),
   password: z.string().min(8).max(256),
   role: RoleEnum,
+}).superRefine((data, ctx) => {
+  const err = passwordPolicyError(data.password, data.username);
+  if (err) ctx.addIssue({ code: 'custom', path: ['password'], message: err });
 });
 
 export const ResetPasswordSchema = z.object({
   password: z.string().min(8).max(256),
+}).superRefine((data, ctx) => {
+  const err = passwordPolicyError(data.password);
+  if (err) ctx.addIssue({ code: 'custom', path: ['password'], message: err });
+});
+
+export const UpdateRoleSchema = z.object({
+  role: RoleEnum,
+});
+
+// ---------------------------------------------------------------------------
+// Invitations (one-time setup links)
+// ---------------------------------------------------------------------------
+
+export const InviteCreateSchema = z.object({
+  email: z.string().email().max(254),
+  name: z.string().max(120).optional().default(''),
+  role: RoleEnum,
+});
+
+export const InviteAcceptSchema = z.object({
+  username: z.string().min(2).max(64).regex(/^[a-zA-Z0-9_.-]+$/, 'Username may only contain letters, numbers, _ . -'),
+  name: z.string().min(1).max(120),
+  password: z.string().min(8).max(256),
+}).superRefine((data, ctx) => {
+  const err = passwordPolicyError(data.password, data.username);
+  if (err) ctx.addIssue({ code: 'custom', path: ['password'], message: err });
+});
+
+// ---------------------------------------------------------------------------
+// Password change / expiry recovery
+// ---------------------------------------------------------------------------
+
+export const ChangePasswordSchema = z.object({
+  oldPassword: z.string().min(1).max(256),
+  newPassword: z.string().min(8).max(256),
+}).superRefine((data, ctx) => {
+  const err = passwordPolicyError(data.newPassword);
+  if (err) ctx.addIssue({ code: 'custom', path: ['newPassword'], message: err });
+});
+
+export const ExpiredPasswordSchema = z.object({
+  username: z.string().min(1).max(64),
+  oldPassword: z.string().min(1).max(256),
+  newPassword: z.string().min(8).max(256),
+}).superRefine((data, ctx) => {
+  const err = passwordPolicyError(data.newPassword, data.username);
+  if (err) ctx.addIssue({ code: 'custom', path: ['newPassword'], message: err });
 });
 
 export const SettingsUpdateSchema = z.object({
   alertRetention: z.number().int().min(0).max(1_000_000).optional(),
   telemetryRetention: z.number().int().min(0).max(1_000_000).optional(),
   analysisRetention: z.number().int().min(0).max(100_000).optional(),
+  // 0 = passwords never expire.
+  passwordMaxAgeDays: z.number().int().min(0).max(3650).optional(),
   // null clears the configured key; string sets it.
   geminiApiKey: z.union([z.string().max(512), z.null()]).optional(),
 });

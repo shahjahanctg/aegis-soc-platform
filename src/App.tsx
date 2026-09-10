@@ -19,6 +19,7 @@ import { ActiveModule, Alert, IOC, UserSession, AnalysisRun } from './types';
 import { api } from './services/api';
 import { useAuthStore } from './stores/authStore';
 import { LoginPage } from './components/layout/LoginPage';
+import { InviteAcceptPage } from './components/layout/InviteAcceptPage';
 import { Bell, ShieldAlert, Sparkles, X } from 'lucide-react';
 
 export default function App() {
@@ -172,8 +173,14 @@ export default function App() {
     playAlertSound(1040);
   };
 
-  // Auth gate: unauthenticated users only see the login page
+  // Public one-time invite links: ?invite=<setup token> opens the accept page.
+  const inviteToken = new URLSearchParams(window.location.search).get('invite');
+
+  // Auth gate: unauthenticated users see the login page (or invite accept page)
   if (!accessToken || !user) {
+    if (inviteToken) {
+      return <InviteAcceptPage token={inviteToken} onAccepted={() => { /* session stored by api */ }} />;
+    }
     return <LoginPage onLogin={() => { /* session already stored by api.login */ }} />;
   }
 

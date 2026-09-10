@@ -1,4 +1,4 @@
-import { Alert, IOC, Course, PhishingCampaign, CTFChallenge, CTFLeaderboardEntry, DFIRTimelineEvent, DFIRArtifact, TelemetryPoint, SensorStatus, UserSession, AnomalyResult, CorrelationResult, AnalysisRun, AnalysisRunSummary, AnalysisRunDetail, ManagedUser, AppSettings } from '../types';
+import { Alert, IOC, Course, PhishingCampaign, CTFChallenge, CTFLeaderboardEntry, DFIRTimelineEvent, DFIRArtifact, TelemetryPoint, SensorStatus, UserSession, AnomalyResult, CorrelationResult, AnalysisRun, AnalysisRunSummary, AnalysisRunDetail, ManagedUser, AppSettings, InviteRecord, AuditEntry } from '../types';
 import { useAuthStore, getAuthState } from '../stores/authStore';
 
 // ---------------------------------------------------------------------------
@@ -65,15 +65,42 @@ export const api = {
   // ---------------------------------------------------------------------------
   // Auth
   // ---------------------------------------------------------------------------
-  async login(username: string, password: string): Promise<{ ok: boolean; error?: string; user?: UserSession }> {
+  async login(username: string, password: string): Promise<{ ok: boolean; error?: string; code?: string; user?: UserSession }> {
     const res = await fetch('/api/auth/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ username, password }),
     });
     if (!res.ok) {
+      const err = await jsonOrThrow<{ error?: string; code?: string }>(res, {});
+      return { ok: false, error: err.error || 'Login failed', code: err.code };
+    }
+    const data = await res.json();
+    useAuthStore.getState().setAuth({ accessToken: data.accessToken, refreshToken: data.refreshToken, user: data.user });
+    return { ok: true, user: data.user };
+  },
+
+  async changePassword(oldPassword: string, newPassword: string): Promise<{ ok: boolean; error?: string }> {
+    const res = await authedFetch('/api/auth/change-password', {
+      method: 'POST',
+      body: JSON.stringify({ oldPassword, newPassword }),
+    });
+    if (!res.ok) {
       const err = await jsonOrThrow<{ error?: string }>(res, {});
-      return { ok: false, error: err.error || 'Login failed' };
+      return { ok: false, error: err.error || 'Failed to change password' };
+    }
+    return { ok: true };
+  },
+
+  async expiredPassword(username: string, oldPassword: string, newPassword: string): Promise<{ ok: boolean; error?: string; user?: UserSession }> {
+    const res = await fetch('/api/auth/expired-password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, oldPassword, newPassword }),
+    });
+    if (!res.ok) {
+      const err = await jsonOrThrow<{ error?: string }>(res, {});
+      return { ok: false, error: err.error || 'Failed to rotate password' };
     }
     const data = await res.json();
     useAuthStore.getState().setAuth({ accessToken: data.accessToken, refreshToken: data.refreshToken, user: data.user });
@@ -401,10 +428,69 @@ export const api = {
     return jsonOrThrow(res, { success: false });
   },
 
+  async updateUserRole(id: string, role: ManagedUser['role']): Promise<ManagedUser> {
+    const res = await authedFetch(`/api/users/${encodeURIComponent(id)}/role`, {
+      method: 'PATCH',
+      body: JSON.stringify({ role }),
+    });
+    return jsonOrThrow(res, {} as ManagedUser);
+  },
+
+  // ---------------------------------------------------------------------------
+  // Invitations (admin) + audit trail
+  // ---------------------------------------------------------------------------
+  async createInvite(input: { email: string; name: string; role: ManagedUser['role'] }): Promise<{ invite: InviteRecord; setupToken: string }> {
+    const res = await authedFetch('/api/invites', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
+    return jsonOrThrow(res, {} as { invite: InviteRecord; setupToken: string });
+  },
+
+  async listInvites(): Promise<InviteRecord[]> {
+    const res = await authedFetch('/api/invites');
+    const data = await jsonOrThrow<{ invites?: InviteRecord[] }>(res, {});
+    return data.invites ?? [];
+  },
+
+  async revokeInvite(id: string): Promise<{ success: boolean }> {
+    const res = await authedFetch(`/api/invites/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    });
+    return jsonOrThrow(res, { success: false });
+  },
+
+  async validateInvite(token: string): Promise<{ invite: InviteRecord } | null> {
+    const res = await fetch(`/api/invites/validate?token=${encodeURIComponent(token)}`);
+    if (!res.ok) return null;
+    return jsonOrThrow(res, {} as { invite: InviteRecord });
+  },
+
+  async acceptInvite(token: string, input: { username: string; name: string; password: string }): Promise<{ ok: boolean; error?: string; user?: UserSession }> {
+    const res = await fetch('/api/invites/accept', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token, ...input }),
+    });
+    if (!res.ok) {
+      const err = await jsonOrThrow<{ error?: string }>(res, {});
+      return { ok: false, error: err.error || 'Failed to accept invite' };
+    }
+    const data = await res.json();
+    useAuthStore.getState().setAuth({ accessToken: data.accessToken, refreshToken: data.refreshToken, user: data.user });
+    return { ok: true, user: data.user };
+  },
+
+  async getAuditLog(limit = 200): Promise<AuditEntry[]> {
+    const res = await authedFetch(`/api/audit?limit=${limit}`);
+    const data = await jsonOrThrow<{ entries?: AuditEntry[] }>(res, {});
+    return data.entries ?? [];
+  },
+
   async getSettings(): Promise<AppSettings> {
     const res = await authedFetch('/api/settings');
     const data = await jsonOrThrow<{ settings?: AppSettings }>(res, {});
-    return data.settings ?? { alertRetention: 2000, telemetryRetention: 2000, analysisRetention: 500, geminiConfigured: false };
+    return data.settings ?? { alertRetention: 2000, telemetryRetention: 2000, analysisRetention: 500, passwordMaxAgeDays: 90, geminiConfigured: false };
   },
 
   async updateSettings(patch: Partial<AppSettings> & { geminiApiKey?: string | null }): Promise<AppSettings> {
