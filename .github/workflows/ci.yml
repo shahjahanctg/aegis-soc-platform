@@ -39,6 +39,8 @@ jobs:
 
       - name: Boot the stack
         run: docker compose up -d --build
+        env:
+          INGEST_API_KEY: ci-ingest-key
 
       - name: Run API E2E suite
         run: |
