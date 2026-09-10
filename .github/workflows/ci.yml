@@ -55,3 +55,5 @@ jobs:
       - name: Tear down
         if: always()
         run: docker compose down -v
+        env:
+          ADMIN_PASSWORD: ci-admin-password
